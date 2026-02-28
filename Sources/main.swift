@@ -8,6 +8,14 @@ final class BubblePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+final class DraggableVisualEffectView: NSVisualEffectView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
+final class DraggableView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 struct FeatureConfig: Codable {
     var id: String
     var displayName: String
@@ -258,9 +266,20 @@ final class KeyCodeMapper {
         "4": UInt32(kVK_ANSI_4), "5": UInt32(kVK_ANSI_5), "6": UInt32(kVK_ANSI_6), "7": UInt32(kVK_ANSI_7),
         "8": UInt32(kVK_ANSI_8), "9": UInt32(kVK_ANSI_9)
     ]
+    private lazy var codeToKey: [UInt32: String] = {
+        var map: [UInt32: String] = [:]
+        for (key, code) in keyToCode {
+            map[code] = key
+        }
+        return map
+    }()
 
     func keyCode(for key: String) -> UInt32? {
         keyToCode[key.uppercased()]
+    }
+
+    func key(for keyCode: UInt32) -> String? {
+        codeToKey[keyCode]
     }
 }
 
@@ -735,6 +754,7 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.isMovable = true
         panel.isMovableByWindowBackground = true
         panel.level = .floating
         panel.isFloatingPanel = true
@@ -744,7 +764,7 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: panel)
         panel.delegate = self
 
-        let container = NSVisualEffectView()
+        let container = DraggableVisualEffectView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.material = .windowBackground
         container.blendingMode = .withinWindow
@@ -1098,6 +1118,8 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.isMovable = true
+        panel.isMovableByWindowBackground = true
         panel.level = .floating
         panel.isFloatingPanel = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -1119,7 +1141,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
 
     private func buildUI(selectedText: String) {
         guard let contentView = window?.contentView else { return }
-        let container = NSView()
+        let container = DraggableView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
         container.layer?.cornerRadius = 12
@@ -1427,23 +1449,96 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
 }
 
 @MainActor
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    @MainActor
+    private enum Theme {
+        static let sidebarWidth: CGFloat = 236
+        static let contentPadding: CGFloat = 24
+        static let sectionSpacing: CGFloat = 18
+        static let cardPadding: CGFloat = 18
+        static let cardCornerRadius: CGFloat = 14
+        static let fieldCornerRadius: CGFloat = 8
+
+        static let sidebarSelection = NSColor.controlAccentColor.withAlphaComponent(0.16)
+        static let sidebarText = NSColor.labelColor
+        static let sidebarSecondaryText = NSColor.secondaryLabelColor
+        static let cardStroke = NSColor.separatorColor.withAlphaComponent(0.42)
+        static let chipGreenBackground = NSColor.systemGreen.withAlphaComponent(0.15)
+        static let chipGreenText = NSColor.systemGreen
+        static let chipOrangeBackground = NSColor.systemOrange.withAlphaComponent(0.15)
+        static let chipOrangeText = NSColor.systemOrange
+        static let fieldBackground = NSColor.controlBackgroundColor.withAlphaComponent(0.82)
+
+        static let largeTitleFont = NSFont.systemFont(ofSize: 28, weight: .semibold)
+        static let sectionTitleFont = NSFont.systemFont(ofSize: 16, weight: .semibold)
+        static let bodyFont = NSFont.systemFont(ofSize: 13)
+        static let captionFont = NSFont.systemFont(ofSize: 12)
+        static let monoFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+    }
+
+    private enum SettingsSection: String, CaseIterable {
+        case connection
+        case entry
+        case prompts
+        case permissions
+
+        var title: String {
+            switch self {
+            case .connection: return "Connection"
+            case .entry: return "Entry Hotkey"
+            case .prompts: return "Prompts"
+            case .permissions: return "Permissions"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .connection: return "API endpoint, key, and model"
+            case .entry: return "Option+A trigger behavior"
+            case .prompts: return "Mode prompt templates"
+            case .permissions: return "System access requirements"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .connection: return "network"
+            case .entry: return "command"
+            case .prompts: return "text.bubble"
+            case .permissions: return "lock.shield"
+            }
+        }
+    }
+
     @MainActor
     final class FeatureHotkeyControls {
         let id: String
-        let keyField = NSTextField(string: "")
-        let optionButton = NSButton(checkboxWithTitle: "Option", target: nil, action: nil)
-        let commandButton = NSButton(checkboxWithTitle: "Command", target: nil, action: nil)
-        let controlButton = NSButton(checkboxWithTitle: "Control", target: nil, action: nil)
-        let shiftButton = NSButton(checkboxWithTitle: "Shift", target: nil, action: nil)
-        let enabledButton = NSButton(checkboxWithTitle: "Enabled", target: nil, action: nil)
+        var hotkeyKey: String
+        var hotkeyOption: Bool
+        var hotkeyCommand: Bool
+        var hotkeyControl: Bool
+        var hotkeyShift: Bool
+        let shortcutPreview = NSTextField(labelWithString: "")
+        let recordButton = NSButton(title: "Record Shortcut...", target: nil, action: nil)
 
-        init(id: String) {
-            self.id = id
-            keyField.alignment = .center
-            keyField.placeholderString = "Key"
-            keyField.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        init(feature: FeatureConfig) {
+            self.id = feature.id
+            self.hotkeyKey = feature.hotkeyKey
+            self.hotkeyOption = feature.hotkeyOption
+            self.hotkeyCommand = feature.hotkeyCommand
+            self.hotkeyControl = feature.hotkeyControl
+            self.hotkeyShift = feature.hotkeyShift
+
+            shortcutPreview.font = Theme.monoFont
+            shortcutPreview.textColor = .labelColor
+            shortcutPreview.alignment = .left
+            shortcutPreview.stringValue = ""
         }
+    }
+
+    @MainActor
+    final class FlippedStackView: NSStackView {
+        override var isFlipped: Bool { true }
     }
 
     private let baseURLField = NSTextField(string: "")
@@ -1453,6 +1548,14 @@ final class SettingsWindowController: NSWindowController {
     private var featureConfigs: [FeatureConfig] = []
     private var featureControls: [String: FeatureHotkeyControls] = [:]
     private var promptEditorWindowController: PromptEditorWindowController?
+    private var sectionButtons: [SettingsSection: NSButton] = [:]
+    private var sectionPages: [SettingsSection: NSView] = [:]
+    private var currentSection: SettingsSection = .connection
+    private weak var detailTitleLabel: NSTextField?
+    private weak var detailSubtitleLabel: NSTextField?
+    private weak var detailPageStack: NSStackView?
+    private var hotkeyCaptureMonitor: Any?
+    private var capturingHotkeyFeatureID: String?
 
     var onSave: ((AppConfig) -> Void)?
     var onQuit: (() -> Void)?
@@ -1463,13 +1566,15 @@ final class SettingsWindowController: NSWindowController {
 
     init(config: AppConfig) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 620),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         window.title = "Jit APP Settings"
+        window.minSize = NSSize(width: 840, height: 560)
         super.init(window: window)
+        window.delegate = self
 
         baseURLField.stringValue = config.baseURL
         apiKeyField.stringValue = config.apiKey
@@ -1485,210 +1590,750 @@ final class SettingsWindowController: NSWindowController {
         fatalError("init(coder:) has not been implemented")
     }
 
+    func windowWillClose(_ notification: Notification) {
+        stopHotkeyCapture()
+    }
+
     func focusPrimaryField() {
         window?.makeFirstResponder(apiKeyField)
     }
 
     private func configureInputFields() {
         [baseURLField, apiKeyField, modelField, targetLanguageField].forEach { field in
-            field.font = NSFont.systemFont(ofSize: 15)
+            field.font = NSFont.systemFont(ofSize: 14)
+            field.focusRingType = .default
+            field.drawsBackground = false
+            field.isBordered = false
             field.setContentHuggingPriority(.defaultLow, for: .horizontal)
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            field.translatesAutoresizingMaskIntoConstraints = false
         }
-        baseURLField.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
-        apiKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
-        modelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
-        targetLanguageField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
     }
 
     private func buildUI() {
         guard let contentView = window?.contentView else { return }
+        contentView.subviews.forEach { $0.removeFromSuperview() }
+        sectionButtons.removeAll()
+        sectionPages.removeAll()
+        featureControls.removeAll()
+        currentSection = .connection
 
-        let contentStack = NSStackView()
-        contentStack.orientation = .vertical
-        contentStack.spacing = 14
-        contentStack.alignment = .leading
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        let split = NSStackView()
+        split.orientation = .horizontal
+        split.spacing = 0
+        split.distribution = .fill
+        split.alignment = .centerY
+        split.translatesAutoresizingMaskIntoConstraints = false
+        split.addArrangedSubview(sidebarView())
+        split.addArrangedSubview(detailView())
+        split.arrangedSubviews[0].widthAnchor.constraint(equalToConstant: Theme.sidebarWidth).isActive = true
 
-        let basic = NSStackView()
-        basic.orientation = .vertical
-        basic.spacing = 10
-        basic.addArrangedSubview(row("Base URL", field: baseURLField))
-        basic.addArrangedSubview(apiKeyRow())
-        basic.addArrangedSubview(row("Model", field: modelField))
-        basic.addArrangedSubview(row("Target Language", field: targetLanguageField))
-        let testButton = NSButton(title: "Test Connection (Translate)", target: self, action: #selector(testTapped))
-        testButton.bezelStyle = .rounded
-        basic.addArrangedSubview(testButton)
-        contentStack.addArrangedSubview(sectionHeader("Basic"))
-        contentStack.addArrangedSubview(basic)
-        contentStack.addArrangedSubview(divider())
+        contentView.addSubview(split)
+        NSLayoutConstraint.activate([
+            split.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            split.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            split.topAnchor.constraint(equalTo: contentView.topAnchor),
+            split.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+        ])
 
-        contentStack.addArrangedSubview(sectionHeader("Unified Entry"))
-        contentStack.addArrangedSubview(featuresRow())
-        contentStack.addArrangedSubview(divider())
+        DispatchQueue.main.async { [weak self] in
+            self?.showSection(.connection, animated: false)
+        }
+    }
 
-        let permissions = NSStackView()
-        permissions.orientation = .vertical
-        permissions.spacing = 10
-        let hint = NSTextField(labelWithString: "Missing permissions may prevent reading selected text.")
-        hint.textColor = .secondaryLabelColor
-        let diagnoseButton = NSButton(title: "Diagnose Permissions", target: self, action: #selector(diagnosePermissionsTapped))
-        diagnoseButton.bezelStyle = .rounded
-        let requestPermissionButton = NSButton(title: "Request Permissions", target: self, action: #selector(requestPermissionsTapped))
-        requestPermissionButton.bezelStyle = .rounded
-        let resetPermissionsButton = NSButton(title: "Reset Permissions", target: self, action: #selector(resetPermissionsTapped))
-        resetPermissionsButton.bezelStyle = .rounded
-        permissions.addArrangedSubview(hint)
-        permissions.addArrangedSubview(diagnoseButton)
-        permissions.addArrangedSubview(requestPermissionButton)
-        permissions.addArrangedSubview(resetPermissionsButton)
-        contentStack.addArrangedSubview(sectionHeader("Permissions"))
-        contentStack.addArrangedSubview(permissions)
+    private func sidebarView() -> NSView {
+        let sidebar = NSVisualEffectView()
+        sidebar.material = .sidebar
+        sidebar.state = .active
+        sidebar.blendingMode = .withinWindow
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.wantsLayer = true
+        sidebar.layer?.borderWidth = 1
+        sidebar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
 
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.documentView = contentStack
+        let iconView = NSImageView()
+        if let image = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "Jit APP") {
+            iconView.image = image
+            iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 30, weight: .semibold)
+            iconView.contentTintColor = .controlAccentColor
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        iconView.heightAnchor.constraint(equalToConstant: 36).isActive = true
+
+        let appTitle = label("Jit APP", font: NSFont.systemFont(ofSize: 17, weight: .semibold), color: Theme.sidebarText)
+        let appSubtitle = label("Preferences", font: Theme.bodyFont, color: Theme.sidebarSecondaryText)
+        let identityStack = NSStackView(views: [appTitle, appSubtitle])
+        identityStack.orientation = .vertical
+        identityStack.spacing = 2
+        identityStack.alignment = .leading
+
+        let topRow = NSStackView(views: [iconView, identityStack])
+        topRow.orientation = .horizontal
+        topRow.spacing = 10
+        topRow.alignment = .centerY
+
+        let navStack = NSStackView()
+        navStack.orientation = .vertical
+        navStack.spacing = 6
+        navStack.alignment = .leading
+        for section in SettingsSection.allCases {
+            let button = sidebarButton(for: section)
+            sectionButtons[section] = button
+            navStack.addArrangedSubview(button)
+        }
+
+        let footnote = label(
+            "Suggested order:\n1) Connection\n2) Entry Hotkey\n3) Prompts\n4) Permissions",
+            font: Theme.captionFont,
+            color: Theme.sidebarSecondaryText
+        )
+        footnote.maximumNumberOfLines = 4
+
+        let container = NSStackView(views: [topRow, navStack, footnote])
+        container.orientation = .vertical
+        container.spacing = 20
+        container.alignment = .leading
+        container.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(container)
+
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 14),
+            container.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -14),
+            container.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 18)
+        ])
+        return sidebar
+    }
+
+    private func sidebarButton(for section: SettingsSection) -> NSButton {
+        let button = NSButton(title: section.title, target: self, action: #selector(sidebarSectionTapped(_:)))
+        button.identifier = NSUserInterfaceItemIdentifier(section.rawValue)
+        button.setButtonType(.momentaryChange)
+        button.isBordered = false
+        button.alignment = .left
+        button.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        button.contentTintColor = Theme.sidebarSecondaryText
+        button.imagePosition = .imageLeading
+        button.imageHugsTitle = true
+        if let image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.title) {
+            button.image = image
+            button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        }
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 8
+        button.layer?.masksToBounds = true
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: Theme.sidebarWidth - 28).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        return button
+    }
+
+    @objc private func sidebarSectionTapped(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, let section = SettingsSection(rawValue: raw) else { return }
+        showSection(section, animated: true)
+    }
+
+    private func showSection(_ section: SettingsSection, animated: Bool) {
+        stopHotkeyCapture()
+        currentSection = section
+        updateSidebarSelection(section)
+        detailTitleLabel?.stringValue = section.title
+        detailSubtitleLabel?.stringValue = section.subtitle
+
+        guard let pageStack = detailPageStack else { return }
+        let nextPage = pageView(for: section)
+        let previous = pageStack.arrangedSubviews.first
+        if previous === nextPage { return }
+
+        if let previous {
+            pageStack.removeArrangedSubview(previous)
+            previous.removeFromSuperview()
+        }
+
+        if animated {
+            nextPage.alphaValue = 0
+        }
+        pageStack.addArrangedSubview(nextPage)
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.16
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                nextPage.animator().alphaValue = 1
+            }
+        }
+    }
+
+    private func pageView(for section: SettingsSection) -> NSView {
+        if let page = sectionPages[section] { return page }
+
+        let content: NSView
+        switch section {
+        case .connection:
+            content = connectionSectionView()
+        case .entry:
+            content = entrySectionView()
+        case .prompts:
+            content = promptsSectionView()
+        case .permissions:
+            content = permissionsSectionView()
+        }
+
+        let pageStack = NSStackView()
+        pageStack.orientation = .vertical
+        pageStack.alignment = .leading
+        pageStack.spacing = Theme.sectionSpacing
+        if section == .prompts {
+            pageStack.addArrangedSubview(content)
+        } else {
+            pageStack.addArrangedSubview(contentCard(content))
+        }
+        sectionPages[section] = pageStack
+        return pageStack
+    }
+
+    private func contentCard(_ content: NSView) -> NSView {
+        let card = NSVisualEffectView()
+        card.material = .contentBackground
+        card.state = .active
+        card.blendingMode = .withinWindow
+        card.wantsLayer = true
+        card.layer?.cornerRadius = Theme.cardCornerRadius
+        card.layer?.masksToBounds = true
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = Theme.cardStroke.cgColor
+
+        content.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Theme.cardPadding),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Theme.cardPadding),
+            content.topAnchor.constraint(equalTo: card.topAnchor, constant: Theme.cardPadding),
+            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Theme.cardPadding)
+        ])
+        return card
+    }
+
+    private func detailView() -> NSView {
+        let detail = NSView()
+        detail.translatesAutoresizingMaskIntoConstraints = false
+
+        let background = NSVisualEffectView()
+        background.material = .underWindowBackground
+        background.state = .active
+        background.blendingMode = .withinWindow
+        background.translatesAutoresizingMaskIntoConstraints = false
+        detail.addSubview(background)
+
+        let titleLabel = label("", font: NSFont.systemFont(ofSize: 27, weight: .semibold), color: .labelColor)
+        let subtitleLabel = label("", font: Theme.bodyFont, color: .secondaryLabelColor)
+        subtitleLabel.maximumNumberOfLines = 2
+        detailTitleLabel = titleLabel
+        detailSubtitleLabel = subtitleLabel
+
+        let headerStack = NSStackView(views: [titleLabel, subtitleLabel])
+        headerStack.orientation = .vertical
+        headerStack.spacing = 4
+        headerStack.alignment = .leading
+        headerStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let pageScroll = NSScrollView()
+        pageScroll.translatesAutoresizingMaskIntoConstraints = false
+        pageScroll.hasVerticalScroller = true
+        pageScroll.borderType = .noBorder
+        pageScroll.drawsBackground = false
+        pageScroll.contentInsets = NSEdgeInsets(
+            top: Theme.contentPadding,
+            left: Theme.contentPadding,
+            bottom: Theme.contentPadding,
+            right: Theme.contentPadding
+        )
+        let pageStack = FlippedStackView()
+        pageStack.orientation = .vertical
+        pageStack.alignment = .leading
+        pageStack.spacing = 0
+        pageStack.translatesAutoresizingMaskIntoConstraints = false
+        pageScroll.documentView = pageStack
+        detailPageStack = pageStack
 
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveTapped))
-        saveButton.bezelStyle = .rounded
+        stylePrimaryButton(saveButton)
         let quitButton = NSButton(title: "Quit App", target: self, action: #selector(quitTapped))
-        quitButton.bezelStyle = .rounded
-        let actionRow = NSStackView(views: [saveButton, quitButton])
+        styleSecondaryButton(quitButton)
+        let actionRow = NSStackView(views: [quitButton, saveButton])
         actionRow.orientation = .horizontal
         actionRow.spacing = 10
-        actionRow.alignment = .trailing
+        actionRow.distribution = .gravityAreas
+        actionRow.alignment = .centerY
         actionRow.translatesAutoresizingMaskIntoConstraints = false
+        saveButton.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        quitButton.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        actionRow.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
-        contentView.addSubview(scroll)
-        contentView.addSubview(actionRow)
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
+        detail.addSubview(headerStack)
+        detail.addSubview(separator)
+        detail.addSubview(pageScroll)
+        detail.addSubview(actionRow)
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-            scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            scroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -12),
-            contentStack.widthAnchor.constraint(equalTo: scroll.widthAnchor, constant: -8),
+            background.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
+            background.topAnchor.constraint(equalTo: detail.topAnchor),
+            background.bottomAnchor.constraint(equalTo: detail.bottomAnchor),
 
-            actionRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            actionRow.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12)
+            headerStack.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: Theme.contentPadding),
+            headerStack.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -Theme.contentPadding),
+            headerStack.topAnchor.constraint(equalTo: detail.topAnchor, constant: 18),
+
+            separator.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
+            separator.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 14),
+
+            pageScroll.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
+            pageScroll.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
+            pageScroll.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 0),
+            pageScroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -12),
+
+            pageStack.widthAnchor.constraint(equalTo: pageScroll.widthAnchor, constant: -(Theme.contentPadding * 2)),
+
+            actionRow.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: Theme.contentPadding),
+            actionRow.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -Theme.contentPadding),
+            actionRow.bottomAnchor.constraint(equalTo: detail.bottomAnchor, constant: -Theme.contentPadding)
         ])
+        return detail
     }
 
-    private func sectionHeader(_ title: String) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
-        label.textColor = .labelColor
-        return label
-    }
-
-    private func divider() -> NSView {
-        let line = NSBox()
-        line.boxType = .separator
-        return line
-    }
-
-    private func row(_ title: String, field: NSView) -> NSView {
-        row(title, custom: field)
-    }
-
-    private func row(_ title: String, custom: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.alignment = .right
-        label.font = NSFont.systemFont(ofSize: 13)
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.widthAnchor.constraint(equalToConstant: 128).isActive = true
-        custom.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        custom.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [label, custom])
-        stack.orientation = .horizontal
-        stack.distribution = .fill
-        stack.alignment = .firstBaseline
-        stack.spacing = 12
+    private func connectionSectionView() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 10
+        stack.alignment = .leading
+        stack.addArrangedSubview(formRow("Base URL", control: fieldContainer(for: baseURLField, minWidth: 520)))
+        stack.addArrangedSubview(apiKeyRow())
+        stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: modelField, minWidth: 340)))
+        stack.addArrangedSubview(formRow("Target Language", control: fieldContainer(for: targetLanguageField, minWidth: 340)))
+        let testButton = NSButton(title: "Test Connection (Translate)", target: self, action: #selector(testTapped))
+        styleSecondaryButton(testButton)
+        testButton.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        stack.addArrangedSubview(testButton)
         return stack
+    }
+
+    private func entrySectionView() -> NSView {
+        featureControls.removeAll()
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 10
+        container.alignment = .leading
+
+        if let entryFeature = featureConfigs.first(where: { $0.id == "custom" }) {
+            let controls = FeatureHotkeyControls(feature: entryFeature)
+            controls.recordButton.identifier = NSUserInterfaceItemIdentifier(entryFeature.id)
+            controls.recordButton.target = self
+            controls.recordButton.action = #selector(recordHotkeyTapped(_:))
+            styleInlineButton(controls.recordButton)
+            controls.recordButton.widthAnchor.constraint(equalToConstant: 148).isActive = true
+            refreshHotkeyPreview(for: controls)
+            featureControls[entryFeature.id] = controls
+
+            let shortcutRow = NSStackView(views: [controls.shortcutPreview, controls.recordButton])
+            shortcutRow.orientation = .horizontal
+            shortcutRow.alignment = .centerY
+            shortcutRow.spacing = 10
+            shortcutRow.distribution = .fill
+            controls.shortcutPreview.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            container.addArrangedSubview(formRow("Current Shortcut", control: shortcutRow))
+        }
+
+        let hint = label(
+            "Click Record Shortcut and press your combination. Existing entry shortcuts are blocked. Press Esc to cancel.",
+            font: Theme.captionFont,
+            color: .secondaryLabelColor
+        )
+        hint.maximumNumberOfLines = 2
+        container.addArrangedSubview(hint)
+        return container
+    }
+
+    private func promptsSectionView() -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 8
+        container.alignment = .leading
+        let hint = label("Edit how each mode transforms selected text.", font: Theme.captionFont, color: .secondaryLabelColor)
+        container.addArrangedSubview(hint)
+        for feature in featureConfigs {
+            let title = label(feature.displayName, font: NSFont.systemFont(ofSize: 13, weight: .medium), color: .labelColor)
+            let subtitle = label(promptSubtitle(for: feature.id), font: Theme.captionFont, color: .secondaryLabelColor)
+            let titleStack = NSStackView(views: [title, subtitle])
+            titleStack.orientation = .vertical
+            titleStack.spacing = 2
+            titleStack.alignment = .leading
+
+            let editPrompt = NSButton(title: "Edit Prompt", target: self, action: #selector(editFeaturePromptTapped(_:)))
+            editPrompt.identifier = NSUserInterfaceItemIdentifier(feature.id)
+            styleInlineButton(editPrompt)
+            editPrompt.widthAnchor.constraint(equalToConstant: 102).isActive = true
+
+            let row = NSStackView(views: [titleStack, editPrompt])
+            row.orientation = .horizontal
+            row.distribution = .fill
+            row.alignment = .centerY
+            row.spacing = 10
+            row.wantsLayer = true
+            row.layer?.cornerRadius = 8
+            row.layer?.masksToBounds = true
+            row.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+            row.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+            container.addArrangedSubview(row)
+        }
+        return container
+    }
+
+    private func permissionsSectionView() -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 10
+        container.alignment = .leading
+        container.addArrangedSubview(permissionStatusRow(
+            title: "Accessibility",
+            allowed: AXIsProcessTrusted(),
+            detail: "Needed to read selected text in other apps."
+        ))
+        container.addArrangedSubview(permissionStatusRow(
+            title: "Input Monitoring",
+            allowed: CGPreflightListenEventAccess(),
+            detail: "Needed by some apps to detect global shortcuts."
+        ))
+        container.addArrangedSubview(permissionStatusRow(
+            title: "Post Events",
+            allowed: CGPreflightPostEventAccess(),
+            detail: "Needed when replacing text back into target apps."
+        ))
+
+        let diagnoseButton = NSButton(title: "Diagnose Permissions", target: self, action: #selector(diagnosePermissionsTapped))
+        styleSecondaryButton(diagnoseButton)
+        let requestPermissionButton = NSButton(title: "Request Permissions", target: self, action: #selector(requestPermissionsTapped))
+        styleSecondaryButton(requestPermissionButton)
+        let resetPermissionsButton = NSButton(title: "Reset Permissions", target: self, action: #selector(resetPermissionsTapped))
+        styleSecondaryButton(resetPermissionsButton)
+
+        let actions = NSStackView(views: [diagnoseButton, requestPermissionButton, resetPermissionsButton])
+        actions.orientation = .horizontal
+        actions.spacing = 8
+        actions.alignment = .centerY
+        container.addArrangedSubview(actions)
+        return container
+    }
+
+    private func permissionStatusRow(title: String, allowed: Bool, detail: String) -> NSView {
+        let icon = NSImageView()
+        if let image = NSImage(systemSymbolName: allowed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill", accessibilityDescription: title) {
+            icon.image = image
+            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+            icon.contentTintColor = allowed ? Theme.chipGreenText : Theme.chipOrangeText
+        }
+
+        let titleLabel = label(title, font: NSFont.systemFont(ofSize: 13, weight: .medium), color: .labelColor)
+        let detailLabel = label(detail, font: Theme.captionFont, color: .secondaryLabelColor)
+        detailLabel.maximumNumberOfLines = 2
+        let textStack = NSStackView(views: [titleLabel, detailLabel])
+        textStack.orientation = .vertical
+        textStack.spacing = 1
+        textStack.alignment = .leading
+
+        let chip = statusChip(text: allowed ? "Allowed" : "Required", allowed: allowed)
+        let row = NSStackView(views: [icon, textStack, chip])
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.alignment = .centerY
+        row.spacing = 10
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 8
+        row.layer?.masksToBounds = true
+        row.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        return row
+    }
+
+    private func statusChip(text: String, allowed: Bool) -> NSView {
+        let chip = NSView()
+        chip.wantsLayer = true
+        chip.layer?.cornerRadius = 8
+        chip.layer?.masksToBounds = true
+        chip.layer?.backgroundColor = (allowed ? Theme.chipGreenBackground : Theme.chipOrangeBackground).cgColor
+
+        let labelView = label(
+            text,
+            font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            color: allowed ? Theme.chipGreenText : Theme.chipOrangeText
+        )
+        labelView.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(labelView)
+        NSLayoutConstraint.activate([
+            labelView.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 8),
+            labelView.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -8),
+            labelView.topAnchor.constraint(equalTo: chip.topAnchor, constant: 3),
+            labelView.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -3)
+        ])
+        return chip
+    }
+
+    private func promptSubtitle(for featureID: String) -> String {
+        switch featureID {
+        case "translate":
+            return "Direct translation prompt"
+        case "refine":
+            return "Rewrite and polish prompt"
+        case "custom":
+            return "Instruction-driven custom mode"
+        default:
+            return "Custom prompt template"
+        }
+    }
+
+    private func formRow(_ title: String, control: NSView) -> NSView {
+        let labelView = label(title, font: Theme.bodyFont, color: .secondaryLabelColor)
+        labelView.alignment = .right
+        labelView.widthAnchor.constraint(equalToConstant: 130).isActive = true
+        let row = NSStackView(views: [labelView, control])
+        row.orientation = .horizontal
+        row.spacing = 10
+        row.alignment = .centerY
+        return row
+    }
+
+    private func fieldContainer(for field: NSTextField, minWidth: CGFloat, height: CGFloat = 32) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = Theme.fieldCornerRadius
+        container.layer?.masksToBounds = true
+        container.layer?.backgroundColor = Theme.fieldBackground.cgColor
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.widthAnchor.constraint(greaterThanOrEqualToConstant: minWidth).isActive = true
+        container.heightAnchor.constraint(equalToConstant: height).isActive = true
+
+        container.addSubview(field)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            field.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            field.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+        return container
     }
 
     private func apiKeyRow() -> NSView {
         let pasteButton = NSButton(title: "Paste", target: self, action: #selector(pasteAPIKey))
-        pasteButton.bezelStyle = .rounded
-        let stack = NSStackView(views: [apiKeyField, pasteButton])
-        stack.orientation = .horizontal
-        stack.spacing = 8
-        return row("API Key", custom: stack)
+        styleInlineButton(pasteButton)
+        pasteButton.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        let row = NSStackView(views: [fieldContainer(for: apiKeyField, minWidth: 430), pasteButton])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .centerY
+        return formRow("API Key", control: row)
     }
 
-    private func featuresRow() -> NSView {
-        featureControls.removeAll()
-        let vertical = NSStackView()
-        vertical.orientation = .vertical
-        vertical.spacing = 10
+    private func stylePrimaryButton(_ button: NSButton) {
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.bezelColor = .controlAccentColor
+        button.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    }
 
-        if let entryFeature = featureConfigs.first(where: { $0.id == "custom" }) {
-            let controls = FeatureHotkeyControls(id: entryFeature.id)
-            controls.keyField.stringValue = entryFeature.hotkeyKey
-            controls.optionButton.state = entryFeature.hotkeyOption ? .on : .off
-            controls.commandButton.state = entryFeature.hotkeyCommand ? .on : .off
-            controls.controlButton.state = entryFeature.hotkeyControl ? .on : .off
-            controls.shiftButton.state = entryFeature.hotkeyShift ? .on : .off
-            controls.enabledButton.state = entryFeature.enabled ? .on : .off
-            featureControls[entryFeature.id] = controls
+    private func styleSecondaryButton(_ button: NSButton) {
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+    }
 
-            let title = NSTextField(labelWithString: "Entry Hotkey (Option+A)")
-            title.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-            let row1 = NSStackView(views: [title, controls.enabledButton])
-            row1.orientation = .horizontal
-            row1.spacing = 8
-            let row2 = NSStackView(views: [controls.optionButton, controls.commandButton, controls.controlButton, controls.shiftButton, controls.keyField])
-            row2.orientation = .horizontal
-            row2.spacing = 8
-            let block = NSStackView(views: [row1, row2])
-            block.orientation = .vertical
-            block.spacing = 4
-            vertical.addArrangedSubview(block)
+    private func styleInlineButton(_ button: NSButton) {
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+    }
+
+    private func shortcutDisplay(
+        key: String,
+        option: Bool,
+        command: Bool,
+        control: Bool,
+        shift: Bool
+    ) -> String {
+        var parts: [String] = []
+        if control { parts.append("⌃") }
+        if option { parts.append("⌥") }
+        if shift { parts.append("⇧") }
+        if command { parts.append("⌘") }
+        parts.append(key.uppercased())
+        return parts.joined()
+    }
+
+    private func hotkeyDisplay(for controls: FeatureHotkeyControls) -> String {
+        let key = controls.hotkeyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if key.isEmpty { return "?" }
+        return shortcutDisplay(
+            key: key,
+            option: controls.hotkeyOption,
+            command: controls.hotkeyCommand,
+            control: controls.hotkeyControl,
+            shift: controls.hotkeyShift
+        )
+    }
+
+    private func refreshHotkeyPreview(for controls: FeatureHotkeyControls) {
+        controls.shortcutPreview.stringValue = hotkeyDisplay(for: controls)
+    }
+
+    private func stopHotkeyCapture() {
+        if let monitor = hotkeyCaptureMonitor {
+            NSEvent.removeMonitor(monitor)
+            hotkeyCaptureMonitor = nil
+        }
+        if let featureID = capturingHotkeyFeatureID,
+           let controls = featureControls[featureID] {
+            controls.recordButton.title = "Record Shortcut..."
+            controls.recordButton.isEnabled = true
+            refreshHotkeyPreview(for: controls)
+        }
+        capturingHotkeyFeatureID = nil
+    }
+
+    @objc private func recordHotkeyTapped(_ sender: NSButton) {
+        guard let featureID = sender.identifier?.rawValue,
+              let controls = featureControls[featureID] else { return }
+        stopHotkeyCapture()
+        capturingHotkeyFeatureID = featureID
+        controls.recordButton.title = "Press keys..."
+        controls.recordButton.isEnabled = false
+        controls.shortcutPreview.stringValue = "Listening... (Esc to cancel)"
+        hotkeyCaptureMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleHotkeyCapture(event)
+        }
+    }
+
+    private func handleHotkeyCapture(_ event: NSEvent) -> NSEvent? {
+        guard let featureID = capturingHotkeyFeatureID,
+              let controls = featureControls[featureID] else {
+            stopHotkeyCapture()
+            return event
+        }
+        if event.keyCode == 53 { // Esc
+            stopHotkeyCapture()
+            return nil
         }
 
-        vertical.addArrangedSubview(divider())
-
-        let promptHint = NSTextField(labelWithString: "Mode prompts used inside Option+A")
-        promptHint.textColor = .secondaryLabelColor
-        promptHint.font = NSFont.systemFont(ofSize: 12)
-        vertical.addArrangedSubview(promptHint)
-
-        for feature in featureConfigs {
-            let title = NSTextField(labelWithString: feature.displayName)
-            title.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-            let editPrompt = NSButton(title: "Edit Prompt", target: self, action: #selector(editFeaturePromptTapped(_:)))
-            editPrompt.identifier = NSUserInterfaceItemIdentifier(feature.id)
-            editPrompt.bezelStyle = .rounded
-
-            let row1 = NSStackView(views: [title, editPrompt])
-            row1.orientation = .horizontal
-            row1.spacing = 8
-            vertical.addArrangedSubview(row1)
+        guard let key = KeyCodeMapper.shared.key(for: UInt32(event.keyCode)) else {
+            NSSound.beep()
+            return nil
         }
-        return vertical
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if flags.isEmpty {
+            controls.shortcutPreview.stringValue = "Add at least one modifier key"
+            NSSound.beep()
+            return nil
+        }
+
+        let option = flags.contains(.option)
+        let command = flags.contains(.command)
+        let control = flags.contains(.control)
+        let shift = flags.contains(.shift)
+        let keyUpper = key.uppercased()
+        let unchanged = controls.hotkeyKey.uppercased() == keyUpper &&
+            controls.hotkeyOption == option &&
+            controls.hotkeyCommand == command &&
+            controls.hotkeyControl == control &&
+            controls.hotkeyShift == shift
+        if !unchanged,
+           let conflict = conflictingFeature(
+               key: keyUpper,
+               option: option,
+               command: command,
+               control: control,
+               shift: shift,
+               excluding: featureID
+           ) {
+            controls.shortcutPreview.stringValue = "Already used by \(conflict.displayName): \(shortcutDisplay(key: keyUpper, option: option, command: command, control: control, shift: shift))"
+            NSSound.beep()
+            return nil
+        }
+
+        controls.hotkeyKey = keyUpper
+        controls.hotkeyOption = option
+        controls.hotkeyCommand = command
+        controls.hotkeyControl = control
+        controls.hotkeyShift = shift
+        refreshHotkeyPreview(for: controls)
+        stopHotkeyCapture()
+        return nil
+    }
+
+    private func conflictingFeature(
+        key: String,
+        option: Bool,
+        command: Bool,
+        control: Bool,
+        shift: Bool,
+        excluding featureID: String
+    ) -> FeatureConfig? {
+        featureConfigs.first(where: { item in
+            item.id != featureID &&
+            item.id == "custom" &&
+            item.enabled &&
+            item.hotkeyKey.uppercased() == key &&
+            item.hotkeyOption == option &&
+            item.hotkeyCommand == command &&
+            item.hotkeyControl == control &&
+            item.hotkeyShift == shift
+        })
+    }
+
+    private func label(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
+        let textField = NSTextField(labelWithString: text)
+        textField.font = font
+        textField.textColor = color
+        return textField
+    }
+
+    private func updateSidebarSelection(_ section: SettingsSection) {
+        for (item, button) in sectionButtons {
+            let selected = (item == section)
+            button.layer?.backgroundColor = selected ? Theme.sidebarSelection.cgColor : NSColor.clear.cgColor
+            button.contentTintColor = selected ? Theme.sidebarText : Theme.sidebarSecondaryText
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .medium),
+                .foregroundColor: selected ? Theme.sidebarText : Theme.sidebarSecondaryText
+            ]
+            button.attributedTitle = NSAttributedString(string: item.title, attributes: attrs)
+        }
     }
 
     private func assembledFeaturesOrAlert() -> [FeatureConfig]? {
         var result: [FeatureConfig] = []
         for var feature in featureConfigs {
-            if feature.id == "custom", let controls = featureControls[feature.id] {
-                let key = controls.keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-                guard key.count == 1, KeyCodeMapper.shared.keyCode(for: key) != nil else {
-                    showAlert("Entry hotkey key must be a single letter or number.")
-                    return nil
-                }
-                feature.hotkeyKey = key
-                feature.hotkeyOption = controls.optionButton.state == .on
-                feature.hotkeyCommand = controls.commandButton.state == .on
-                feature.hotkeyControl = controls.controlButton.state == .on
-                feature.hotkeyShift = controls.shiftButton.state == .on
-                feature.enabled = controls.enabledButton.state == .on
-                if feature.enabled && feature.modifierFlags.isEmpty {
-                    showAlert("Entry hotkey must have at least one modifier key.")
-                    return nil
+            if feature.id == "custom" {
+                if let controls = featureControls[feature.id] {
+                    let key = controls.hotkeyKey.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                    guard key.count == 1, KeyCodeMapper.shared.keyCode(for: key) != nil else {
+                        showAlert("Entry hotkey key must be a single letter or number.")
+                        return nil
+                    }
+                    feature.hotkeyKey = key
+                    feature.hotkeyOption = controls.hotkeyOption
+                    feature.hotkeyCommand = controls.hotkeyCommand
+                    feature.hotkeyControl = controls.hotkeyControl
+                    feature.hotkeyShift = controls.hotkeyShift
+                    feature.enabled = true
+                    if feature.enabled && feature.modifierFlags.isEmpty {
+                        showAlert("Entry hotkey must have at least one modifier key.")
+                        return nil
+                    }
+                } else {
+                    feature.enabled = true
                 }
             } else {
                 // translate/refine are mode-only now; no standalone hotkeys.
@@ -1717,6 +2362,7 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func saveTapped() {
+        stopHotkeyCapture()
         guard let config = buildConfigOrShowError() else { return }
         onSave?(config)
         window?.close()
@@ -1742,7 +2388,10 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
-    @objc private func quitTapped() { onQuit?() }
+    @objc private func quitTapped() {
+        stopHotkeyCapture()
+        onQuit?()
+    }
 
     @objc private func editFeaturePromptTapped(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue,
