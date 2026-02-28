@@ -1468,6 +1468,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         static let chipOrangeBackground = NSColor.systemOrange.withAlphaComponent(0.15)
         static let chipOrangeText = NSColor.systemOrange
         static let fieldBackground = NSColor.controlBackgroundColor.withAlphaComponent(0.82)
+        static let inlineError = NSColor.systemRed
+        static let inlineSuccess = NSColor.systemGreen
 
         static let largeTitleFont = NSFont.systemFont(ofSize: 28, weight: .semibold)
         static let sectionTitleFont = NSFont.systemFont(ofSize: 16, weight: .semibold)
@@ -1554,11 +1556,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private weak var detailTitleLabel: NSTextField?
     private weak var detailSubtitleLabel: NSTextField?
     private weak var detailPageStack: NSStackView?
+    private weak var footerStatusLabel: NSTextField?
+    private weak var connectionAdvancedStack: NSStackView?
     private var hotkeyCaptureMonitor: Any?
     private var capturingHotkeyFeatureID: String?
 
     var onSave: ((AppConfig) -> Void)?
-    var onQuit: (() -> Void)?
     var onTest: ((AppConfig, FeatureConfig, @escaping @MainActor (Result<String, Error>) -> Void) -> Void)?
     var onDiagnosePermissions: (() -> String)?
     var onRequestPermissions: (() -> String)?
@@ -1566,13 +1569,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     init(config: AppConfig) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 920, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         window.title = "Jit APP Settings"
-        window.minSize = NSSize(width: 840, height: 560)
+        window.minSize = NSSize(width: 780, height: 500)
         super.init(window: window)
         window.delegate = self
 
@@ -1616,6 +1619,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         sectionButtons.removeAll()
         sectionPages.removeAll()
         featureControls.removeAll()
+        connectionAdvancedStack = nil
         currentSection = .connection
 
         let split = NSStackView()
@@ -1683,14 +1687,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             navStack.addArrangedSubview(button)
         }
 
-        let footnote = label(
-            "Suggested order:\n1) Connection\n2) Entry Hotkey\n3) Prompts\n4) Permissions",
-            font: Theme.captionFont,
-            color: Theme.sidebarSecondaryText
-        )
-        footnote.maximumNumberOfLines = 4
-
-        let container = NSStackView(views: [topRow, navStack, footnote])
+        let container = NSStackView(views: [topRow, navStack])
         container.orientation = .vertical
         container.spacing = 20
         container.alignment = .leading
@@ -1737,6 +1734,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         stopHotkeyCapture()
         currentSection = section
         updateSidebarSelection(section)
+        setFooterStatus(nil)
         detailTitleLabel?.stringValue = section.title
         detailSubtitleLabel?.stringValue = section.subtitle
 
@@ -1855,18 +1853,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         pageScroll.documentView = pageStack
         detailPageStack = pageStack
 
+        let statusLabel = label("", font: Theme.captionFont, color: .secondaryLabelColor)
+        statusLabel.maximumNumberOfLines = 2
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        footerStatusLabel = statusLabel
+
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveTapped))
         stylePrimaryButton(saveButton)
-        let quitButton = NSButton(title: "Quit App", target: self, action: #selector(quitTapped))
-        styleSecondaryButton(quitButton)
-        let actionRow = NSStackView(views: [quitButton, saveButton])
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let actionRow = NSStackView(views: [statusLabel, spacer, saveButton])
         actionRow.orientation = .horizontal
         actionRow.spacing = 10
-        actionRow.distribution = .gravityAreas
+        actionRow.distribution = .fill
         actionRow.alignment = .centerY
         actionRow.translatesAutoresizingMaskIntoConstraints = false
         saveButton.widthAnchor.constraint(equalToConstant: 140).isActive = true
-        quitButton.widthAnchor.constraint(equalToConstant: 110).isActive = true
         actionRow.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
         let separator = NSBox()
@@ -1908,16 +1913,43 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func connectionSectionView() -> NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
-        stack.spacing = 10
+        stack.spacing = 12
         stack.alignment = .leading
-        stack.addArrangedSubview(formRow("Base URL", control: fieldContainer(for: baseURLField, minWidth: 520)))
+
+        let requiredLabel = label("Connection Setup", font: Theme.sectionTitleFont, color: .labelColor)
+        let requiredHint = label("Set endpoint, API key, and model for requests.", font: Theme.captionFont, color: .secondaryLabelColor)
+        requiredHint.maximumNumberOfLines = 2
+        let requiredHeader = NSStackView(views: [requiredLabel, requiredHint])
+        requiredHeader.orientation = .vertical
+        requiredHeader.spacing = 2
+        requiredHeader.alignment = .leading
+        stack.addArrangedSubview(requiredHeader)
+
+        stack.addArrangedSubview(formRow("Base URL", control: fieldContainer(for: baseURLField, minWidth: 500)))
         stack.addArrangedSubview(apiKeyRow())
-        stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: modelField, minWidth: 340)))
-        stack.addArrangedSubview(formRow("Target Language", control: fieldContainer(for: targetLanguageField, minWidth: 340)))
+        stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: modelField, minWidth: 320)))
+
         let testButton = NSButton(title: "Test Connection (Translate)", target: self, action: #selector(testTapped))
         styleSecondaryButton(testButton)
         testButton.widthAnchor.constraint(equalToConstant: 220).isActive = true
-        stack.addArrangedSubview(testButton)
+        stack.addArrangedSubview(formRow("Validate", control: testButton))
+
+        let advancedToggle = NSButton(checkboxWithTitle: "Show Advanced Settings", target: self, action: #selector(toggleConnectionAdvanced))
+        advancedToggle.font = Theme.bodyFont
+        let hasCustomTarget = targetLanguageField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() != AppConfig.defaults.targetLanguage.lowercased()
+        advancedToggle.state = hasCustomTarget ? .on : .off
+        stack.addArrangedSubview(advancedToggle)
+
+        let advancedStack = NSStackView()
+        advancedStack.orientation = .vertical
+        advancedStack.spacing = 10
+        advancedStack.alignment = .leading
+        advancedStack.addArrangedSubview(formRow("Target Language", control: fieldContainer(for: targetLanguageField, minWidth: 320)))
+        advancedStack.isHidden = advancedToggle.state != .on
+        connectionAdvancedStack = advancedStack
+        stack.addArrangedSubview(advancedStack)
         return stack
     }
 
@@ -1925,8 +1957,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         featureControls.removeAll()
         let container = NSStackView()
         container.orientation = .vertical
-        container.spacing = 10
+        container.spacing = 12
         container.alignment = .leading
+
+        let title = label("Entry Shortcut", font: Theme.sectionTitleFont, color: .labelColor)
+        let subtitle = label("Use one shortcut to open Jit on selected text.", font: Theme.captionFont, color: .secondaryLabelColor)
+        subtitle.maximumNumberOfLines = 2
+        let header = NSStackView(views: [title, subtitle])
+        header.orientation = .vertical
+        header.spacing = 2
+        header.alignment = .leading
+        container.addArrangedSubview(header)
 
         if let entryFeature = featureConfigs.first(where: { $0.id == "custom" }) {
             let controls = FeatureHotkeyControls(feature: entryFeature)
@@ -1948,7 +1989,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
 
         let hint = label(
-            "Click Record Shortcut and press your combination. Existing entry shortcuts are blocked. Press Esc to cancel.",
+            "Click Record Shortcut, then press keys. Existing entry shortcuts are blocked. Press Esc to cancel.",
             font: Theme.captionFont,
             color: .secondaryLabelColor
         )
@@ -1960,16 +2001,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func promptsSectionView() -> NSView {
         let container = NSStackView()
         container.orientation = .vertical
-        container.spacing = 8
+        container.spacing = 12
         container.alignment = .leading
-        let hint = label("Edit how each mode transforms selected text.", font: Theme.captionFont, color: .secondaryLabelColor)
-        container.addArrangedSubview(hint)
+        container.addArrangedSubview(sectionHeader(
+            title: "Prompt Templates",
+            subtitle: "Edit how each mode transforms selected text."
+        ))
+
         for feature in featureConfigs {
-            let title = label(feature.displayName, font: NSFont.systemFont(ofSize: 13, weight: .medium), color: .labelColor)
+            let title = label(feature.displayName, font: NSFont.systemFont(ofSize: 14, weight: .semibold), color: .labelColor)
             let subtitle = label(promptSubtitle(for: feature.id), font: Theme.captionFont, color: .secondaryLabelColor)
-            let titleStack = NSStackView(views: [title, subtitle])
+            let preview = label(promptPreview(for: feature), font: Theme.captionFont, color: .tertiaryLabelColor)
+            preview.maximumNumberOfLines = 1
+            preview.lineBreakMode = .byTruncatingTail
+            let titleStack = NSStackView(views: [title, subtitle, preview])
             titleStack.orientation = .vertical
-            titleStack.spacing = 2
+            titleStack.spacing = 3
             titleStack.alignment = .leading
 
             let editPrompt = NSButton(title: "Edit Prompt", target: self, action: #selector(editFeaturePromptTapped(_:)))
@@ -1982,12 +2029,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             row.distribution = .fill
             row.alignment = .centerY
             row.spacing = 10
-            row.wantsLayer = true
-            row.layer?.cornerRadius = 8
-            row.layer?.masksToBounds = true
-            row.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
-            row.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-            container.addArrangedSubview(row)
+            container.addArrangedSubview(styledRow(row))
         }
         return container
     }
@@ -1995,8 +2037,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func permissionsSectionView() -> NSView {
         let container = NSStackView()
         container.orientation = .vertical
-        container.spacing = 10
+        container.spacing = 12
         container.alignment = .leading
+        container.addArrangedSubview(sectionHeader(
+            title: "System Permissions",
+            subtitle: "Grant access so Jit can read selected text, listen for shortcuts, and paste results."
+        ))
+
         container.addArrangedSubview(permissionStatusRow(
             title: "Accessibility",
             allowed: AXIsProcessTrusted(),
@@ -2013,18 +2060,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             detail: "Needed when replacing text back into target apps."
         ))
 
+        let actionTitle = label("Permission Actions", font: Theme.sectionTitleFont, color: .labelColor)
+        actionTitle.setContentCompressionResistancePriority(.required, for: .vertical)
+        container.addArrangedSubview(actionTitle)
+
         let diagnoseButton = NSButton(title: "Diagnose Permissions", target: self, action: #selector(diagnosePermissionsTapped))
         styleSecondaryButton(diagnoseButton)
         let requestPermissionButton = NSButton(title: "Request Permissions", target: self, action: #selector(requestPermissionsTapped))
         styleSecondaryButton(requestPermissionButton)
         let resetPermissionsButton = NSButton(title: "Reset Permissions", target: self, action: #selector(resetPermissionsTapped))
         styleSecondaryButton(resetPermissionsButton)
+        diagnoseButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        requestPermissionButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        resetPermissionsButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
 
         let actions = NSStackView(views: [diagnoseButton, requestPermissionButton, resetPermissionsButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.alignment = .centerY
-        container.addArrangedSubview(actions)
+        container.addArrangedSubview(styledRow(actions))
         return container
     }
 
@@ -2050,12 +2104,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         row.distribution = .fill
         row.alignment = .centerY
         row.spacing = 10
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 8
-        row.layer?.masksToBounds = true
-        row.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
-        row.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-        return row
+        return styledRow(row)
     }
 
     private func statusChip(text: String, allowed: Bool) -> NSView {
@@ -2092,6 +2141,43 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         default:
             return "Custom prompt template"
         }
+    }
+
+    private func promptPreview(for feature: FeatureConfig) -> String {
+        let firstLine = feature.promptTemplate
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? ""
+        if firstLine.isEmpty {
+            return "No prompt preview available."
+        }
+        return firstLine
+    }
+
+    private func sectionHeader(title: String, subtitle: String) -> NSView {
+        let titleLabel = label(title, font: Theme.sectionTitleFont, color: .labelColor)
+        let subtitleLabel = label(subtitle, font: Theme.captionFont, color: .secondaryLabelColor)
+        subtitleLabel.maximumNumberOfLines = 2
+        let stack = NSStackView(views: [titleLabel, subtitleLabel])
+        stack.orientation = .vertical
+        stack.spacing = 2
+        stack.alignment = .leading
+        return stack
+    }
+
+    private func styledRow(_ content: NSView) -> NSView {
+        let row = NSStackView(views: [content])
+        row.orientation = .vertical
+        row.alignment = .leading
+        row.spacing = 0
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 9
+        row.layer?.masksToBounds = true
+        row.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
+        row.layer?.borderWidth = 1
+        row.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+        row.edgeInsets = NSEdgeInsets(top: 9, left: 11, bottom: 9, right: 11)
+        return row
     }
 
     private func formRow(_ title: String, control: NSView) -> NSView {
@@ -2154,6 +2240,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+    }
+
+    private enum FooterStatusKind {
+        case neutral
+        case success
+        case error
+    }
+
+    private func setFooterStatus(_ message: String?, kind: FooterStatusKind = .neutral) {
+        guard let footerStatusLabel else { return }
+        let text = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        footerStatusLabel.stringValue = text
+        switch kind {
+        case .neutral:
+            footerStatusLabel.textColor = .secondaryLabelColor
+        case .success:
+            footerStatusLabel.textColor = Theme.inlineSuccess
+        case .error:
+            footerStatusLabel.textColor = Theme.inlineError
+        }
     }
 
     private func shortcutDisplay(
@@ -2319,7 +2425,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 if let controls = featureControls[feature.id] {
                     let key = controls.hotkeyKey.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
                     guard key.count == 1, KeyCodeMapper.shared.keyCode(for: key) != nil else {
-                        showAlert("Entry hotkey key must be a single letter or number.")
+                        setFooterStatus("Entry hotkey key must be a single letter or number.", kind: .error)
                         return nil
                     }
                     feature.hotkeyKey = key
@@ -2329,7 +2435,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                     feature.hotkeyShift = controls.hotkeyShift
                     feature.enabled = true
                     if feature.enabled && feature.modifierFlags.isEmpty {
-                        showAlert("Entry hotkey must have at least one modifier key.")
+                        setFooterStatus("Entry hotkey must have at least one modifier key.", kind: .error)
                         return nil
                     }
                 } else {
@@ -2348,7 +2454,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if baseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
             modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
             apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            showAlert("Base URL / API Key / Model cannot be empty.")
+            setFooterStatus("Base URL / API Key / Model cannot be empty.", kind: .error)
             return nil
         }
         guard let features = assembledFeaturesOrAlert() else { return nil }
@@ -2365,7 +2471,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         stopHotkeyCapture()
         guard let config = buildConfigOrShowError() else { return }
         onSave?(config)
-        window?.close()
+        setFooterStatus("Saved.", kind: .success)
     }
 
     @objc private func testTapped() {
@@ -2374,23 +2480,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         onTest?(config, feature) { [weak self] result in
             guard let self else { return }
             switch result {
-            case .success(let message): self.showInfo("Connection Success", message: message)
-            case .failure(let error): self.showAlert("Connection failed: \(error.localizedDescription)")
+            case .success(let message):
+                self.setFooterStatus("Connection OK. \(message)", kind: .success)
+            case .failure(let error):
+                self.setFooterStatus("Connection failed: \(error.localizedDescription)", kind: .error)
             }
         }
+    }
+
+    @objc private func toggleConnectionAdvanced(_ sender: NSButton) {
+        connectionAdvancedStack?.isHidden = sender.state != .on
     }
 
     @objc private func pasteAPIKey() {
         if let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             apiKeyField.stringValue = text
+            setFooterStatus("API key pasted.", kind: .success)
         } else {
-            showAlert("No usable text found in clipboard.")
+            setFooterStatus("No usable text found in clipboard.", kind: .error)
         }
-    }
-
-    @objc private func quitTapped() {
-        stopHotkeyCapture()
-        onQuit?()
     }
 
     @objc private func editFeaturePromptTapped(_ sender: NSButton) {
@@ -2414,7 +2522,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             if let index = self.featureConfigs.firstIndex(where: { $0.id == feature.id }) {
                 self.featureConfigs[index].promptTemplate = newTemplate
-                self.showInfo("Prompt Saved", message: "\(self.featureConfigs[index].displayName) prompt updated.")
+                self.setFooterStatus("\(self.featureConfigs[index].displayName) prompt updated. Click Save to apply.", kind: .success)
             }
         }
         editor.showWindow(nil)
@@ -2425,29 +2533,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func diagnosePermissionsTapped() {
-        showInfo("Permission Diagnostics", message: onDiagnosePermissions?() ?? "No diagnostics available.")
+        let report = onDiagnosePermissions?() ?? "No diagnostics available."
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
+        let allAllowed = report.contains("Accessibility: Allowed") &&
+            report.contains("Input Monitoring (ListenEvent): Allowed") &&
+            report.contains("Event Posting (PostEvent): Allowed")
+        if allAllowed {
+            setFooterStatus("All permissions look good. Diagnostics copied to clipboard.", kind: .success)
+        } else {
+            setFooterStatus("Some permissions are missing. Diagnostics copied to clipboard.", kind: .error)
+        }
     }
 
     @objc private func requestPermissionsTapped() {
-        _ = onRequestPermissions?()
+        let report = onRequestPermissions?() ?? "Permission request callback is not provided."
+        let stillMissing = report.contains("Not Allowed")
+        if stillMissing {
+            setFooterStatus("Permission prompts requested. Grant access in System Settings, then test again.", kind: .neutral)
+        } else {
+            setFooterStatus("Permissions already granted.", kind: .success)
+        }
     }
 
     @objc private func resetPermissionsTapped() {
-        showInfo("Permission Reset Result", message: onResetPermissions?() ?? "Permission reset callback is not provided.")
-    }
-
-    private func showAlert(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Error"
-        alert.informativeText = message
-        alert.runModal()
-    }
-
-    private func showInfo(_ title: String, message: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.runModal()
+        let report = onResetPermissions?() ?? "Permission reset callback is not provided."
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
+        setFooterStatus("Permission reset attempted. Result copied to clipboard. Restart Jit APP afterward.", kind: .neutral)
     }
 }
 
@@ -2734,9 +2847,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
-        }
-        controller.onQuit = { [weak self] in
-            self?.quit()
         }
         controller.onDiagnosePermissions = { [weak self] in
             self?.permissionReport() ?? "Diagnostics failed."
