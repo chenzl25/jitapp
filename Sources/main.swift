@@ -1429,6 +1429,89 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
 @MainActor
 final class SettingsWindowController: NSWindowController {
     @MainActor
+    private enum Theme {
+        static let bg0 = NSColor(srgbRed: 0.12, green: 0.13, blue: 0.15, alpha: 1.0)
+        static let bg1 = NSColor(srgbRed: 0.16, green: 0.18, blue: 0.22, alpha: 0.9)
+        static let bg2 = NSColor(srgbRed: 0.22, green: 0.24, blue: 0.28, alpha: 1.0)
+        static let stroke = NSColor.white.withAlphaComponent(0.10)
+        static let textPrimary = NSColor(srgbRed: 0.95, green: 0.96, blue: 0.97, alpha: 1.0)
+        static let textSecondary = NSColor(srgbRed: 0.72, green: 0.75, blue: 0.80, alpha: 1.0)
+        static let accent = NSColor(srgbRed: 0.40, green: 0.78, blue: 1.0, alpha: 1.0)
+        static let accentStrong = NSColor(srgbRed: 0.33, green: 0.72, blue: 0.96, alpha: 1.0)
+
+        static let windowPadding: CGFloat = 24
+        static let sectionSpacing: CGFloat = 16
+        static let cardPadding: CGFloat = 20
+        static let rowSpacing: CGFloat = 12
+
+        static let cardCorner: CGFloat = 16
+        static let fieldCorner: CGFloat = 10
+        static let buttonCorner: CGFloat = 14
+
+        static let heroTitleFont = NSFont.systemFont(ofSize: 44, weight: .semibold)
+        static let sectionTitleFont = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        static let rowTitleFont = NSFont.systemFont(ofSize: 15, weight: .medium)
+        static let bodyFont = NSFont.systemFont(ofSize: 14)
+        static let smallFont = NSFont.systemFont(ofSize: 13)
+
+        static let entranceDuration: TimeInterval = 0.24
+        static let entranceStagger: TimeInterval = 0.05
+    }
+
+    private enum ButtonStyle {
+        case primary
+        case secondary
+        case ghost
+        case accentText
+    }
+
+    @MainActor
+    final class GradientOverlayView: NSView {
+        private let baseGradient = CAGradientLayer()
+        private let glowGradient = CAGradientLayer()
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer = CALayer()
+            setupLayers()
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func layout() {
+            super.layout()
+            baseGradient.frame = bounds
+            glowGradient.frame = bounds
+        }
+
+        private func setupLayers() {
+            guard let root = layer else { return }
+            root.masksToBounds = true
+
+            baseGradient.startPoint = CGPoint(x: 0.0, y: 1.0)
+            baseGradient.endPoint = CGPoint(x: 1.0, y: 0.0)
+            baseGradient.colors = [
+                NSColor(srgbRed: 0.10, green: 0.11, blue: 0.14, alpha: 1.0).cgColor,
+                NSColor(srgbRed: 0.16, green: 0.17, blue: 0.20, alpha: 1.0).cgColor
+            ]
+
+            glowGradient.startPoint = CGPoint(x: 0.0, y: 0.5)
+            glowGradient.endPoint = CGPoint(x: 0.35, y: 0.5)
+            glowGradient.colors = [
+                Theme.accent.withAlphaComponent(0.18).cgColor,
+                Theme.accent.withAlphaComponent(0.02).cgColor,
+                NSColor.clear.cgColor
+            ]
+
+            root.addSublayer(baseGradient)
+            root.addSublayer(glowGradient)
+        }
+    }
+
+    @MainActor
     final class FeatureHotkeyControls {
         let id: String
         let keyField = NSTextField(string: "")
@@ -1442,7 +1525,11 @@ final class SettingsWindowController: NSWindowController {
             self.id = id
             keyField.alignment = .center
             keyField.placeholderString = "Key"
-            keyField.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            keyField.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .semibold)
+            keyField.drawsBackground = false
+            keyField.isBordered = false
+            keyField.focusRingType = .none
+            keyField.widthAnchor.constraint(equalToConstant: 52).isActive = true
         }
     }
 
@@ -1453,6 +1540,8 @@ final class SettingsWindowController: NSWindowController {
     private var featureConfigs: [FeatureConfig] = []
     private var featureControls: [String: FeatureHotkeyControls] = [:]
     private var promptEditorWindowController: PromptEditorWindowController?
+    private var entranceViews: [NSView] = []
+    private var didRunEntranceAnimation = false
 
     var onSave: ((AppConfig) -> Void)?
     var onQuit: (() -> Void)?
@@ -1463,12 +1552,15 @@ final class SettingsWindowController: NSWindowController {
 
     init(config: AppConfig) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 740),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         window.title = "Jit APP Settings"
+        window.minSize = NSSize(width: 860, height: 620)
+        window.isOpaque = false
+        window.backgroundColor = .clear
         super.init(window: window)
 
         baseURLField.stringValue = config.baseURL
@@ -1491,103 +1583,213 @@ final class SettingsWindowController: NSWindowController {
 
     private func configureInputFields() {
         [baseURLField, apiKeyField, modelField, targetLanguageField].forEach { field in
-            field.font = NSFont.systemFont(ofSize: 15)
+            field.font = Theme.bodyFont
+            field.textColor = Theme.textPrimary
+            field.drawsBackground = false
+            field.isBordered = false
+            field.focusRingType = .none
+            field.translatesAutoresizingMaskIntoConstraints = false
             field.setContentHuggingPriority(.defaultLow, for: .horizontal)
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        baseURLField.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
-        apiKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
-        modelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
-        targetLanguageField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
     }
 
     private func buildUI() {
         guard let contentView = window?.contentView else { return }
+        setupWindowBackground(contentView)
+        entranceViews.removeAll()
 
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
-        contentStack.spacing = 14
+        contentStack.spacing = Theme.sectionSpacing
         contentStack.alignment = .leading
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
+        let hero = heroView()
+        contentStack.addArrangedSubview(hero)
+        entranceViews.append(hero)
+
         let basic = NSStackView()
         basic.orientation = .vertical
-        basic.spacing = 10
-        basic.addArrangedSubview(row("Base URL", field: baseURLField))
+        basic.spacing = Theme.rowSpacing
+        basic.addArrangedSubview(row("Base URL", field: fieldContainer(for: baseURLField, minWidth: 560)))
         basic.addArrangedSubview(apiKeyRow())
-        basic.addArrangedSubview(row("Model", field: modelField))
-        basic.addArrangedSubview(row("Target Language", field: targetLanguageField))
+        basic.addArrangedSubview(row("Model", field: fieldContainer(for: modelField, minWidth: 420)))
+        basic.addArrangedSubview(row("Target Language", field: fieldContainer(for: targetLanguageField, minWidth: 420)))
         let testButton = NSButton(title: "Test Connection (Translate)", target: self, action: #selector(testTapped))
-        testButton.bezelStyle = .rounded
+        styleButton(testButton, style: .secondary)
+        testButton.widthAnchor.constraint(equalToConstant: 230).isActive = true
         basic.addArrangedSubview(testButton)
-        contentStack.addArrangedSubview(sectionHeader("Basic"))
-        contentStack.addArrangedSubview(basic)
-        contentStack.addArrangedSubview(divider())
+        let basicCard = cardView(
+            title: "API Configuration",
+            subtitle: "Set provider endpoint, credentials, and output language.",
+            content: basic
+        )
+        contentStack.addArrangedSubview(basicCard)
+        entranceViews.append(basicCard)
 
-        contentStack.addArrangedSubview(sectionHeader("Unified Entry"))
-        contentStack.addArrangedSubview(featuresRow())
-        contentStack.addArrangedSubview(divider())
+        let featuresCard = cardView(
+            title: "Unified Entry",
+            subtitle: "Configure Option+A entry hotkey and edit prompts per mode.",
+            content: featuresRow()
+        )
+        contentStack.addArrangedSubview(featuresCard)
+        entranceViews.append(featuresCard)
 
-        let permissions = NSStackView()
-        permissions.orientation = .vertical
-        permissions.spacing = 10
-        let hint = NSTextField(labelWithString: "Missing permissions may prevent reading selected text.")
-        hint.textColor = .secondaryLabelColor
-        let diagnoseButton = NSButton(title: "Diagnose Permissions", target: self, action: #selector(diagnosePermissionsTapped))
-        diagnoseButton.bezelStyle = .rounded
-        let requestPermissionButton = NSButton(title: "Request Permissions", target: self, action: #selector(requestPermissionsTapped))
-        requestPermissionButton.bezelStyle = .rounded
-        let resetPermissionsButton = NSButton(title: "Reset Permissions", target: self, action: #selector(resetPermissionsTapped))
-        resetPermissionsButton.bezelStyle = .rounded
-        permissions.addArrangedSubview(hint)
-        permissions.addArrangedSubview(diagnoseButton)
-        permissions.addArrangedSubview(requestPermissionButton)
-        permissions.addArrangedSubview(resetPermissionsButton)
-        contentStack.addArrangedSubview(sectionHeader("Permissions"))
-        contentStack.addArrangedSubview(permissions)
+        let permissionsCard = cardView(
+            title: "Permissions",
+            subtitle: "Read selection and automation require system permissions.",
+            content: permissionsPanel()
+        )
+        contentStack.addArrangedSubview(permissionsCard)
+        entranceViews.append(permissionsCard)
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
+        scroll.contentInsets = NSEdgeInsets(
+            top: Theme.windowPadding,
+            left: Theme.windowPadding,
+            bottom: Theme.windowPadding,
+            right: Theme.windowPadding
+        )
         scroll.documentView = contentStack
 
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveTapped))
-        saveButton.bezelStyle = .rounded
+        styleButton(saveButton, style: .primary)
         let quitButton = NSButton(title: "Quit App", target: self, action: #selector(quitTapped))
-        quitButton.bezelStyle = .rounded
-        let actionRow = NSStackView(views: [saveButton, quitButton])
+        styleButton(quitButton, style: .ghost)
+        let actionRow = NSStackView(views: [quitButton, saveButton])
         actionRow.orientation = .horizontal
-        actionRow.spacing = 10
-        actionRow.alignment = .trailing
+        actionRow.distribution = .fillEqually
+        actionRow.spacing = 12
+        actionRow.alignment = .centerY
         actionRow.translatesAutoresizingMaskIntoConstraints = false
 
         contentView.addSubview(scroll)
         contentView.addSubview(actionRow)
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-            scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            scroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -12),
-            contentStack.widthAnchor.constraint(equalTo: scroll.widthAnchor, constant: -8),
+            scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: contentView.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -14),
+            contentStack.widthAnchor.constraint(equalTo: scroll.widthAnchor, constant: -(Theme.windowPadding * 2)),
 
-            actionRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            actionRow.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12)
+            actionRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.windowPadding),
+            actionRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.windowPadding),
+            actionRow.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.windowPadding),
+            actionRow.heightAnchor.constraint(equalToConstant: 52)
+        ])
+
+        DispatchQueue.main.async { [weak self] in
+            self?.animateEntranceIfNeeded()
+        }
+    }
+
+    private func setupWindowBackground(_ contentView: NSView) {
+        contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = Theme.bg0.cgColor
+
+        let blur = NSVisualEffectView()
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.material = .hudWindow
+        blur.state = .active
+        blur.blendingMode = .withinWindow
+        contentView.addSubview(blur)
+
+        let gradient = GradientOverlayView()
+        gradient.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(gradient)
+
+        NSLayoutConstraint.activate([
+            blur.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            blur.topAnchor.constraint(equalTo: contentView.topAnchor),
+            blur.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+
+            gradient.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            gradient.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            gradient.topAnchor.constraint(equalTo: contentView.topAnchor),
+            gradient.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
     }
 
-    private func sectionHeader(_ title: String) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
-        label.textColor = .labelColor
-        return label
-    }
+    private func heroView() -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = Theme.cardCorner
+        container.layer?.masksToBounds = true
+        container.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.75).cgColor
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = Theme.stroke.cgColor
+        container.layer?.shadowColor = NSColor.black.cgColor
+        container.layer?.shadowOpacity = 0.22
+        container.layer?.shadowRadius = 28
+        container.layer?.shadowOffset = NSSize(width: 0, height: -8)
 
-    private func divider() -> NSView {
-        let line = NSBox()
-        line.boxType = .separator
-        return line
+        let track = NSView()
+        track.translatesAutoresizingMaskIntoConstraints = false
+        track.wantsLayer = true
+        track.layer?.cornerRadius = 4
+        track.layer?.masksToBounds = true
+        track.layer?.backgroundColor = Theme.bg2.withAlphaComponent(0.8).cgColor
+
+        let fill = NSView()
+        fill.translatesAutoresizingMaskIntoConstraints = false
+        fill.wantsLayer = true
+        fill.layer?.cornerRadius = 4
+        fill.layer?.masksToBounds = true
+        fill.layer?.backgroundColor = Theme.accent.cgColor
+        fill.layer?.shadowColor = Theme.accent.cgColor
+        fill.layer?.shadowOpacity = 0.7
+        fill.layer?.shadowRadius = 12
+        fill.layer?.shadowOffset = NSSize(width: 0, height: 0)
+        track.addSubview(fill)
+
+        let title = label(
+            "Let's tune Jit APP",
+            font: Theme.heroTitleFont,
+            color: Theme.textPrimary
+        )
+        let subtitle = label(
+            "Refined UI, same behavior. Configure API, prompts, and permissions below.",
+            font: NSFont.systemFont(ofSize: 18, weight: .regular),
+            color: Theme.textSecondary
+        )
+        subtitle.maximumNumberOfLines = 2
+
+        let stack = NSStackView(views: [track, title, subtitle])
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Theme.cardPadding),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Theme.cardPadding),
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: Theme.cardPadding),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -Theme.cardPadding),
+
+            track.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            track.heightAnchor.constraint(equalToConstant: 8),
+
+            fill.leadingAnchor.constraint(equalTo: track.leadingAnchor),
+            fill.topAnchor.constraint(equalTo: track.topAnchor),
+            fill.bottomAnchor.constraint(equalTo: track.bottomAnchor),
+            fill.widthAnchor.constraint(equalTo: track.widthAnchor, multiplier: 0.34)
+        ])
+
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 0.8
+        pulse.toValue = 1.0
+        pulse.duration = 1.2
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        fill.layer?.add(pulse, forKey: "progressPulse")
+        return container
     }
 
     private func row(_ title: String, field: NSView) -> NSView {
@@ -1595,27 +1797,25 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func row(_ title: String, custom: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.alignment = .right
-        label.font = NSFont.systemFont(ofSize: 13)
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.widthAnchor.constraint(equalToConstant: 128).isActive = true
+        let titleLabel = label(title, font: Theme.rowTitleFont, color: Theme.textPrimary)
+        titleLabel.setContentHuggingPriority(.required, for: .vertical)
         custom.setContentHuggingPriority(.defaultLow, for: .horizontal)
         custom.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [label, custom])
-        stack.orientation = .horizontal
-        stack.distribution = .fill
-        stack.alignment = .firstBaseline
-        stack.spacing = 12
+        let stack = NSStackView(views: [titleLabel, custom])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
         return stack
     }
 
     private func apiKeyRow() -> NSView {
         let pasteButton = NSButton(title: "Paste", target: self, action: #selector(pasteAPIKey))
-        pasteButton.bezelStyle = .rounded
-        let stack = NSStackView(views: [apiKeyField, pasteButton])
+        styleButton(pasteButton, style: .secondary)
+        pasteButton.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        let stack = NSStackView(views: [fieldContainer(for: apiKeyField, minWidth: 460), pasteButton])
         stack.orientation = .horizontal
-        stack.spacing = 8
+        stack.spacing = 10
+        stack.alignment = .centerY
         return row("API Key", custom: stack)
     }
 
@@ -1623,7 +1823,7 @@ final class SettingsWindowController: NSWindowController {
         featureControls.removeAll()
         let vertical = NSStackView()
         vertical.orientation = .vertical
-        vertical.spacing = 10
+        vertical.spacing = 14
 
         if let entryFeature = featureConfigs.first(where: { $0.id == "custom" }) {
             let controls = FeatureHotkeyControls(id: entryFeature.id)
@@ -1635,40 +1835,215 @@ final class SettingsWindowController: NSWindowController {
             controls.enabledButton.state = entryFeature.enabled ? .on : .off
             featureControls[entryFeature.id] = controls
 
-            let title = NSTextField(labelWithString: "Entry Hotkey (Option+A)")
-            title.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+            [controls.optionButton, controls.commandButton, controls.controlButton, controls.shiftButton, controls.enabledButton].forEach {
+                styleToggle($0)
+            }
+
+            let title = label("Entry Hotkey (Option+A)", font: Theme.rowTitleFont, color: Theme.textPrimary)
             let row1 = NSStackView(views: [title, controls.enabledButton])
             row1.orientation = .horizontal
-            row1.spacing = 8
-            let row2 = NSStackView(views: [controls.optionButton, controls.commandButton, controls.controlButton, controls.shiftButton, controls.keyField])
+            row1.distribution = .fill
+            row1.spacing = 12
+            let row2 = NSStackView(views: [
+                controls.optionButton,
+                controls.commandButton,
+                controls.controlButton,
+                controls.shiftButton,
+                fieldContainer(for: controls.keyField, minWidth: 72, height: 36)
+            ])
             row2.orientation = .horizontal
-            row2.spacing = 8
+            row2.spacing = 10
+            row2.alignment = .centerY
             let block = NSStackView(views: [row1, row2])
             block.orientation = .vertical
-            block.spacing = 4
+            block.spacing = 10
             vertical.addArrangedSubview(block)
         }
 
-        vertical.addArrangedSubview(divider())
+        vertical.addArrangedSubview(dividerLine())
 
-        let promptHint = NSTextField(labelWithString: "Mode prompts used inside Option+A")
-        promptHint.textColor = .secondaryLabelColor
-        promptHint.font = NSFont.systemFont(ofSize: 12)
+        let promptHint = label("Mode prompts used inside Option+A", font: Theme.smallFont, color: Theme.textSecondary)
         vertical.addArrangedSubview(promptHint)
 
         for feature in featureConfigs {
-            let title = NSTextField(labelWithString: feature.displayName)
-            title.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+            let title = label(feature.displayName, font: Theme.rowTitleFont, color: Theme.textPrimary)
             let editPrompt = NSButton(title: "Edit Prompt", target: self, action: #selector(editFeaturePromptTapped(_:)))
             editPrompt.identifier = NSUserInterfaceItemIdentifier(feature.id)
-            editPrompt.bezelStyle = .rounded
+            styleButton(editPrompt, style: .accentText)
+            editPrompt.widthAnchor.constraint(equalToConstant: 110).isActive = true
 
             let row1 = NSStackView(views: [title, editPrompt])
             row1.orientation = .horizontal
-            row1.spacing = 8
+            row1.distribution = .fill
+            row1.spacing = 12
+            row1.alignment = .centerY
             vertical.addArrangedSubview(row1)
         }
         return vertical
+    }
+
+    private func permissionsPanel() -> NSView {
+        let permissions = NSStackView()
+        permissions.orientation = .vertical
+        permissions.spacing = 10
+        let hint = label(
+            "Missing permissions may prevent reading selected text and automation.",
+            font: Theme.bodyFont,
+            color: Theme.textSecondary
+        )
+        hint.maximumNumberOfLines = 2
+
+        let diagnoseButton = NSButton(title: "Diagnose Permissions", target: self, action: #selector(diagnosePermissionsTapped))
+        styleButton(diagnoseButton, style: .secondary)
+        let requestPermissionButton = NSButton(title: "Request Permissions", target: self, action: #selector(requestPermissionsTapped))
+        styleButton(requestPermissionButton, style: .secondary)
+        let resetPermissionsButton = NSButton(title: "Reset Permissions", target: self, action: #selector(resetPermissionsTapped))
+        styleButton(resetPermissionsButton, style: .secondary)
+
+        permissions.addArrangedSubview(hint)
+        permissions.addArrangedSubview(diagnoseButton)
+        permissions.addArrangedSubview(requestPermissionButton)
+        permissions.addArrangedSubview(resetPermissionsButton)
+        return permissions
+    }
+
+    private func cardView(title: String, subtitle: String, content: NSView) -> NSView {
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.cornerRadius = Theme.cardCorner
+        card.layer?.masksToBounds = false
+        card.layer?.backgroundColor = Theme.bg1.cgColor
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = Theme.stroke.cgColor
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.18
+        card.layer?.shadowRadius = 28
+        card.layer?.shadowOffset = NSSize(width: 0, height: -8)
+
+        let titleLabel = label(title, font: Theme.sectionTitleFont, color: Theme.textPrimary)
+        let subtitleLabel = label(subtitle, font: Theme.bodyFont, color: Theme.textSecondary)
+        subtitleLabel.maximumNumberOfLines = 2
+
+        let header = NSStackView(views: [titleLabel, subtitleLabel])
+        header.orientation = .vertical
+        header.spacing = 6
+        header.alignment = .leading
+
+        let stack = NSStackView(views: [header, content])
+        stack.orientation = .vertical
+        stack.spacing = Theme.rowSpacing
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Theme.cardPadding),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Theme.cardPadding),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: Theme.cardPadding),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Theme.cardPadding)
+        ])
+        return card
+    }
+
+    private func fieldContainer(for field: NSTextField, minWidth: CGFloat, height: CGFloat = 40) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = Theme.fieldCorner
+        container.layer?.masksToBounds = true
+        container.layer?.backgroundColor = Theme.bg2.withAlphaComponent(0.85).cgColor
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = Theme.stroke.cgColor
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(field)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(greaterThanOrEqualToConstant: minWidth),
+            container.heightAnchor.constraint(equalToConstant: height),
+            field.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            field.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            field.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+        return container
+    }
+
+    private func dividerLine() -> NSView {
+        let line = NSView()
+        line.wantsLayer = true
+        line.layer?.backgroundColor = Theme.stroke.cgColor
+        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return line
+    }
+
+    private func label(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
+        let value = NSTextField(labelWithString: text)
+        value.font = font
+        value.textColor = color
+        return value
+    }
+
+    private func styleToggle(_ button: NSButton) {
+        button.font = Theme.smallFont
+        button.contentTintColor = Theme.textSecondary
+    }
+
+    private func styleButton(_ button: NSButton, style: ButtonStyle) {
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.masksToBounds = true
+        button.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+
+        switch style {
+        case .primary:
+            button.layer?.cornerRadius = Theme.buttonCorner
+            button.layer?.backgroundColor = Theme.accentStrong.cgColor
+            button.layer?.borderWidth = 0
+            button.contentTintColor = NSColor.black
+            button.heightAnchor.constraint(equalToConstant: 52).isActive = true
+        case .secondary:
+            button.layer?.cornerRadius = 10
+            button.layer?.backgroundColor = Theme.bg2.withAlphaComponent(0.85).cgColor
+            button.layer?.borderWidth = 1
+            button.layer?.borderColor = Theme.stroke.cgColor
+            button.contentTintColor = Theme.textPrimary
+            button.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        case .ghost:
+            button.layer?.cornerRadius = Theme.buttonCorner
+            button.layer?.backgroundColor = NSColor.clear.cgColor
+            button.layer?.borderWidth = 1
+            button.layer?.borderColor = Theme.stroke.cgColor
+            button.contentTintColor = Theme.textPrimary
+            button.heightAnchor.constraint(equalToConstant: 52).isActive = true
+        case .accentText:
+            button.layer?.cornerRadius = 10
+            button.layer?.backgroundColor = Theme.accent.withAlphaComponent(0.12).cgColor
+            button.layer?.borderWidth = 1
+            button.layer?.borderColor = Theme.accent.withAlphaComponent(0.35).cgColor
+            button.contentTintColor = Theme.accent
+            button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        }
+    }
+
+    private func animateEntranceIfNeeded() {
+        guard !didRunEntranceAnimation else { return }
+        didRunEntranceAnimation = true
+        for (index, view) in entranceViews.enumerated() {
+            view.alphaValue = 0
+            view.wantsLayer = true
+            let delay = Theme.entranceStagger * Double(index)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                let move = CABasicAnimation(keyPath: "transform.translation.y")
+                move.fromValue = 8
+                move.toValue = 0
+                move.duration = Theme.entranceDuration
+                move.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                view.layer?.add(move, forKey: "jit.settings.slideIn")
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = Theme.entranceDuration
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    view.animator().alphaValue = 1
+                }
+            }
+        }
     }
 
     private func assembledFeaturesOrAlert() -> [FeatureConfig]? {
