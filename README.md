@@ -1,71 +1,71 @@
-# FanyiApp (macOS)
+# Jit APP (macOS)
 
-一个可全局使用的划词翻译菜单栏应用，支持 OpenAI 兼容 Chat 接口（可直接填 DeepSeek key）。
+A menu bar app for translating selected text globally on macOS, using an OpenAI-compatible Chat API (you can use a DeepSeek API key directly).
 
-## 功能
+## Features
 
-- 全局热键翻译，默认 `Option + D`
-- 热键可配置（修饰键 + 单个字母/数字）
-- 划词后按热键触发翻译
-- 配置项：`Base URL / API Key / Model / 目标语言`
-- 菜单栏开关开机自启
+- Global hotkey translation (default: `Option + D`)
+- Configurable hotkeys (modifier keys + a single letter/number)
+- Trigger translation by selecting text and pressing the hotkey
+- Configurable options: `Base URL / API Key / Model / Target Language`
+- Launch-at-login toggle from the menu bar
 
-## 本地开发运行
+## Run Locally
 
 ```bash
 swift run
 ```
 
-## 打包为可双击安装的 .app / .dmg
+## Build a Double-Clickable `.app` / `.dmg`
 
 ```bash
 ./scripts/release.sh
 ```
 
-产物位置：
+Output:
 
-- `dist/Fanyi.app`
-- `dist/Fanyi.dmg`
+- `dist/Jit APP.app`
+- `dist/Jit-APP.dmg`
 
-也可分步执行：
+You can also run the steps separately:
 
 ```bash
 ./scripts/build_app.sh
 ./scripts/package_dmg.sh
 ```
 
-## 签名
+## Signing
 
-默认使用 ad-hoc 签名（本机可运行）。
+By default, the app is signed with ad-hoc signing (works on the local machine).
 
-如果你有开发者证书，可在构建时指定：
+If you have a Developer ID certificate, specify it at build time:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build_app.sh
 ```
 
-## 首次使用
+## First-Time Setup
 
-1. 双击打开 `dist/Fanyi.app`
-2. 菜单栏点 `译 -> 设置` 填入 API 参数
-3. 在任意应用中选中文字
-4. 按热键（默认 `Option + D`）翻译
+1. Double-click `dist/Jit APP.app` to open it.
+2. In the menu bar app, open `Settings...` and fill in API settings.
+3. Select text in any app.
+4. Press the hotkey (default: `Option + D`) to translate.
 
-## 权限与系统设置
+## Permissions and System Settings
 
-为了全局读取选中文本，请在 macOS 开启：
+To read selected text globally, enable this macOS permission:
 
-- `系统设置 -> 隐私与安全性 -> 辅助功能`
+- `System Settings -> Privacy & Security -> Accessibility`
 
-为了开机自启生效，若菜单显示“等待系统批准”，请前往：
+To enable launch at login, if the menu shows "Waiting for system approval", go to:
 
-- `系统设置 -> 通用 -> 登录项`
+- `System Settings -> General -> Login Items`
 
-## 脚本说明
+## Scripts
 
-- `scripts/generate_icon.swift`: 生成 1024 PNG 图标
-- `scripts/make_icon.sh`: 生成 `.icns`
-- `scripts/build_app.sh`: 构建并组装 `.app`
-- `scripts/sign_app.sh`: 签名与校验
-- `scripts/package_dmg.sh`: 打包 `.dmg`
-- `scripts/release.sh`: 一键构建 + 打包
+- `scripts/generate_icon.swift`: Generate a 1024px PNG icon
+- `scripts/make_icon.sh`: Generate `.icns`
+- `scripts/build_app.sh`: Build and assemble the `.app`
+- `scripts/sign_app.sh`: Sign and verify the app
+- `scripts/package_dmg.sh`: Package a `.dmg`
+- `scripts/release.sh`: One-command build + package
