@@ -1,0 +1,23 @@
+.DS_Store
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+
+# Build / release artifacts
+/dist/
+*.dmg
+
+# Generated icon assets
+/Assets/AppIcon-1024.png
+/Assets/AppIcon.icns
+/Assets/AppIcon.iconset/
+
+# macOS clutter
+.AppleDouble
+.LSOverride
+Icon?
+._*
