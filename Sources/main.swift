@@ -2047,42 +2047,75 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         container.addArrangedSubview(permissionStatusRow(
             title: "Accessibility",
             allowed: AXIsProcessTrusted(),
-            detail: "Needed to read selected text in other apps."
+            detail: "Needed to read selected text in other apps.",
+            actionTitle: "Open Settings",
+            actionSelector: #selector(openAccessibilitySettingsTapped),
+            actionToolTip: "Open Privacy & Security -> Accessibility"
         ))
         container.addArrangedSubview(permissionStatusRow(
             title: "Input Monitoring",
             allowed: CGPreflightListenEventAccess(),
-            detail: "Needed by some apps to detect global shortcuts."
+            detail: "Needed by some apps to detect global shortcuts.",
+            actionTitle: "Open Settings",
+            actionSelector: #selector(openInputMonitoringSettingsTapped),
+            actionToolTip: "Open Privacy & Security -> Input Monitoring"
         ))
         container.addArrangedSubview(permissionStatusRow(
             title: "Post Events",
             allowed: CGPreflightPostEventAccess(),
-            detail: "Needed when replacing text back into target apps."
+            detail: "Needed when replacing text back into target apps.",
+            actionTitle: "Open Settings",
+            actionSelector: #selector(openPrivacySecuritySettingsTapped),
+            actionToolTip: "Open Privacy & Security"
         ))
+
+        let guide = label(
+            "Quick Fix: 1) Request All, 2) Open the matching System Settings page, 3) enable Jit APP, 4) Refresh Status.",
+            font: Theme.captionFont,
+            color: .secondaryLabelColor
+        )
+        guide.maximumNumberOfLines = 2
+        container.addArrangedSubview(guide)
 
         let actionTitle = label("Permission Actions", font: Theme.sectionTitleFont, color: .labelColor)
         actionTitle.setContentCompressionResistancePriority(.required, for: .vertical)
         container.addArrangedSubview(actionTitle)
 
-        let diagnoseButton = NSButton(title: "Diagnose Permissions", target: self, action: #selector(diagnosePermissionsTapped))
+        let requestPermissionButton = NSButton(title: "Request All", target: self, action: #selector(requestPermissionsTapped))
+        stylePrimaryButton(requestPermissionButton)
+        let refreshPermissionButton = NSButton(title: "Refresh Status", target: self, action: #selector(refreshPermissionStatusTapped))
+        styleSecondaryButton(refreshPermissionButton)
+        let diagnoseButton = NSButton(title: "Copy Diagnostics", target: self, action: #selector(diagnosePermissionsTapped))
         styleSecondaryButton(diagnoseButton)
-        let requestPermissionButton = NSButton(title: "Request Permissions", target: self, action: #selector(requestPermissionsTapped))
-        styleSecondaryButton(requestPermissionButton)
         let resetPermissionsButton = NSButton(title: "Reset Permissions", target: self, action: #selector(resetPermissionsTapped))
-        styleSecondaryButton(resetPermissionsButton)
-        diagnoseButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
-        requestPermissionButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
-        resetPermissionsButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        styleDestructiveButton(resetPermissionsButton)
+        [requestPermissionButton, refreshPermissionButton, diagnoseButton, resetPermissionsButton].forEach {
+            $0.setContentCompressionResistancePriority(.required, for: .horizontal)
+            $0.setContentHuggingPriority(.required, for: .horizontal)
+        }
 
-        let actions = NSStackView(views: [diagnoseButton, requestPermissionButton, resetPermissionsButton])
-        actions.orientation = .horizontal
-        actions.spacing = 8
-        actions.alignment = .centerY
-        container.addArrangedSubview(styledRow(actions))
+        let quickActions = NSStackView(views: [requestPermissionButton, refreshPermissionButton, diagnoseButton])
+        quickActions.orientation = .horizontal
+        quickActions.spacing = 8
+        quickActions.alignment = .centerY
+        container.addArrangedSubview(styledRow(quickActions))
+
+        let resetRow = NSStackView(views: [resetPermissionsButton])
+        resetRow.orientation = .horizontal
+        resetRow.spacing = 8
+        resetRow.alignment = .centerY
+        container.addArrangedSubview(styledRow(resetRow))
         return container
     }
 
-    private func permissionStatusRow(title: String, allowed: Bool, detail: String) -> NSView {
+    private func permissionStatusRow(
+        title: String,
+        allowed: Bool,
+        detail: String,
+        actionTitle: String? = nil,
+        actionSelector: Selector? = nil,
+        actionToolTip: String? = nil
+    ) -> NSView {
         let icon = NSImageView()
         if let image = NSImage(systemSymbolName: allowed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill", accessibilityDescription: title) {
             icon.image = image
@@ -2099,7 +2132,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         textStack.alignment = .leading
 
         let chip = statusChip(text: allowed ? "Allowed" : "Required", allowed: allowed)
-        let row = NSStackView(views: [icon, textStack, chip])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        var rowViews: [NSView] = [icon, textStack, spacer, chip]
+        if !allowed, let actionTitle, let actionSelector {
+            let openButton = NSButton(title: actionTitle, target: self, action: actionSelector)
+            styleInlineButton(openButton)
+            openButton.toolTip = actionToolTip
+            rowViews.append(openButton)
+        }
+
+        let row = NSStackView(views: rowViews)
         row.orientation = .horizontal
         row.distribution = .fill
         row.alignment = .centerY
@@ -2240,6 +2283,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+    }
+
+    private func styleDestructiveButton(_ button: NSButton) {
+        styleSecondaryButton(button)
+        button.contentTintColor = .systemRed
     }
 
     private enum FooterStatusKind {
@@ -2556,11 +2604,91 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    @objc private func refreshPermissionStatusTapped() {
+        sectionPages[.permissions] = nil
+        if currentSection == .permissions {
+            showSection(.permissions, animated: false)
+        }
+
+        let report = onDiagnosePermissions?() ?? ""
+        if report.isEmpty {
+            setFooterStatus("Permission status refreshed.", kind: .neutral)
+            return
+        }
+
+        let allAllowed = report.contains("Accessibility: Allowed") &&
+            report.contains("Input Monitoring (ListenEvent): Allowed") &&
+            report.contains("Event Posting (PostEvent): Allowed")
+        if allAllowed {
+            setFooterStatus("Permission status refreshed: all required permissions are allowed.", kind: .success)
+        } else {
+            setFooterStatus("Permission status refreshed: some permissions are still missing.", kind: .error)
+        }
+    }
+
+    @objc private func openPrivacySecuritySettingsTapped() {
+        openSystemSettings(
+            candidates: [
+                "x-apple.systempreferences:com.apple.preference.security?Privacy",
+                "x-apple.systempreferences:com.apple.preference.security"
+            ],
+            successMessage: "Opened System Settings. Go to Privacy & Security."
+        )
+    }
+
+    @objc private func openAccessibilitySettingsTapped() {
+        openSystemSettings(
+            candidates: [
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy"
+            ],
+            successMessage: "Opened System Settings. Go to Privacy & Security -> Accessibility."
+        )
+    }
+
+    @objc private func openInputMonitoringSettingsTapped() {
+        openSystemSettings(
+            candidates: [
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy"
+            ],
+            successMessage: "Opened System Settings. Go to Privacy & Security -> Input Monitoring."
+        )
+    }
+
     @objc private func resetPermissionsTapped() {
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = "Reset Permissions?"
+        confirm.informativeText = "This resets Jit APP permission records and may require re-granting access in System Settings."
+        confirm.addButton(withTitle: "Cancel")
+        confirm.addButton(withTitle: "Reset")
+        if confirm.runModal() != .alertSecondButtonReturn {
+            setFooterStatus("Permission reset canceled.", kind: .neutral)
+            return
+        }
+
         let report = onResetPermissions?() ?? "Permission reset callback is not provided."
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(report, forType: .string)
         setFooterStatus("Permission reset attempted. Result copied to clipboard. Restart Jit APP afterward.", kind: .neutral)
+    }
+
+    private func openSystemSettings(candidates: [String], successMessage: String) {
+        for candidate in candidates {
+            guard let url = URL(string: candidate) else { continue }
+            if NSWorkspace.shared.open(url) {
+                setFooterStatus(successMessage, kind: .neutral)
+                return
+            }
+        }
+
+        let appURL = URL(fileURLWithPath: "/System/Applications/System Settings.app")
+        if NSWorkspace.shared.open(appURL) {
+            setFooterStatus("Opened System Settings. Navigate to Privacy & Security manually.", kind: .neutral)
+        } else {
+            setFooterStatus("Failed to open System Settings.", kind: .error)
+        }
     }
 }
 
