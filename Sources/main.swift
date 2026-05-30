@@ -16,6 +16,50 @@ final class DraggableView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
 }
 
+extension NSColor {
+    convenience init(hex: UInt32, alpha: CGFloat = 1) {
+        self.init(
+            calibratedRed: CGFloat((hex >> 16) & 0xff) / 255,
+            green: CGFloat((hex >> 8) & 0xff) / 255,
+            blue: CGFloat(hex & 0xff) / 255,
+            alpha: alpha
+        )
+    }
+
+    static func jitDynamic(light: UInt32, dark: UInt32, alpha: CGFloat = 1) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return NSColor(hex: isDark ? dark : light, alpha: alpha)
+        }
+    }
+}
+
+@MainActor
+private enum LantorVisual {
+    static let surface = NSColor.jitDynamic(light: 0xfbfcfd, dark: 0x374151)
+    static let panel = NSColor.jitDynamic(light: 0xf4f6f9, dark: 0x303844)
+    static let panelStrong = NSColor.jitDynamic(light: 0xf7f8fa, dark: 0x3d4858)
+    static let input = NSColor.jitDynamic(light: 0xfbfcfd, dark: 0x2a3340)
+    static let control = NSColor.jitDynamic(light: 0xedf1f5, dark: 0x404b5c)
+    static let ink = NSColor.jitDynamic(light: 0x20242b, dark: 0xf4f6fa)
+    static let secondaryInk = NSColor.jitDynamic(light: 0x4f5661, dark: 0xdde3ec)
+    static let mutedInk = NSColor.jitDynamic(light: 0x68717d, dark: 0xb3bdcc)
+    static let border = NSColor.jitDynamic(light: 0x20242c, dark: 0xe2e8f0, alpha: 0.16)
+    static let borderSubtle = NSColor.jitDynamic(light: 0x20242c, dark: 0xe2e8f0, alpha: 0.10)
+    static let accent = NSColor.jitDynamic(light: 0x0a84ff, dark: 0x69aafc)
+    static let accentInk = NSColor.jitDynamic(light: 0xffffff, dark: 0x07111f)
+    static let accentSoft = NSColor.jitDynamic(light: 0x0a84ff, dark: 0x69aafc, alpha: 0.12)
+    static let accentSoftBorder = NSColor.jitDynamic(light: 0x0a84ff, dark: 0x69aafc, alpha: 0.30)
+    static let thinkingSoft = NSColor.jitDynamic(light: 0x5ac8fa, dark: 0x5ac8fa, alpha: 0.16)
+    static let thinkingInk = NSColor.jitDynamic(light: 0x0071a8, dark: 0x7dd3fc)
+    static let successSoft = NSColor.jitDynamic(light: 0x34c759, dark: 0x34c759, alpha: 0.15)
+    static let successInk = NSColor.jitDynamic(light: 0x167d32, dark: 0x67d084)
+    static let warningSoft = NSColor.jitDynamic(light: 0xff9f0a, dark: 0xffb142, alpha: 0.17)
+    static let warningInk = NSColor.jitDynamic(light: 0x9a5a00, dark: 0xffc166)
+    static let errorSoft = NSColor.jitDynamic(light: 0xff453a, dark: 0xff453a, alpha: 0.14)
+    static let errorInk = NSColor.jitDynamic(light: 0xc91810, dark: 0xffb4ab)
+}
+
 struct FeatureConfig: Codable {
     var id: String
     var displayName: String
@@ -182,10 +226,10 @@ struct AppConfig {
     static func load() -> AppConfig {
         let d = UserDefaults.standard
         var config = AppConfig.defaults
-        if let value = d.string(forKey: "baseURL") { config.baseURL = value }
+        if let value = d.string(forKey: "baseURL")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.baseURL = value }
         if let value = d.string(forKey: "apiKey") { config.apiKey = value }
-        if let value = d.string(forKey: "model") { config.model = value }
-        if let value = d.string(forKey: "targetLanguage") { config.targetLanguage = value }
+        if let value = d.string(forKey: "model")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.model = value }
+        if let value = d.string(forKey: "targetLanguage")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.targetLanguage = value }
         if let featuresData = d.data(forKey: "featureConfigs"),
            let decoded = try? JSONDecoder().decode([FeatureConfig].self, from: featuresData),
            !decoded.isEmpty {
@@ -228,6 +272,12 @@ struct AppConfig {
             }
         }
         return config
+    }
+
+    var hasRequiredConnectionSettings: Bool {
+        !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func save() {
@@ -593,6 +643,7 @@ struct ChatRequest: Encodable {
     let model: String
     let messages: [Message]
     let temperature: Double
+    let stream: Bool?
 }
 
 struct ChatResponse: Decodable {
@@ -630,6 +681,139 @@ struct ChatResponse: Decodable {
     let choices: [Choice]
 }
 
+struct ChatStreamResponse: Decodable {
+    struct Choice: Decodable {
+        struct Delta: Decodable {
+            let content: String
+
+            enum CodingKeys: String, CodingKey {
+                case content
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+
+                if let stringContent = try? container.decode(String.self, forKey: .content) {
+                    content = stringContent
+                    return
+                }
+
+                if let parts = try? container.decode([ContentPart].self, forKey: .content) {
+                    content = parts.map { $0.text }.joined(separator: "\n")
+                    return
+                }
+
+                content = ""
+            }
+
+            struct ContentPart: Decodable {
+                let text: String
+            }
+        }
+
+        let delta: Delta?
+    }
+
+    let choices: [Choice]
+}
+
+final class TextProcessingRun {
+    private let cancelHandler: @Sendable () -> Void
+    private let retainedObjects: [Any]
+
+    init(cancelHandler: @escaping @Sendable () -> Void, retaining retainedObjects: [Any] = []) {
+        self.cancelHandler = cancelHandler
+        self.retainedObjects = retainedObjects
+    }
+
+    func cancel() {
+        cancelHandler()
+    }
+}
+
+final class StreamingChatDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let onPartial: @Sendable (String) -> Void
+    private let completion: @Sendable (Result<String, Error>) -> Void
+    private var lineBuffer = ""
+    private var responseBody = ""
+    private var output = ""
+    private var statusCode = 0
+    private var didComplete = false
+
+    init(
+        onPartial: @escaping @Sendable (String) -> Void,
+        completion: @escaping @Sendable (Result<String, Error>) -> Void
+    ) {
+        self.onPartial = onPartial
+        self.completion = completion
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard (200..<300).contains(statusCode) else {
+            if responseBody.count < 16_000 {
+                responseBody += String(data: data, encoding: .utf8) ?? ""
+            }
+            return
+        }
+
+        lineBuffer += String(data: data, encoding: .utf8) ?? ""
+        processBufferedLines()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !didComplete else { return }
+        didComplete = true
+        defer { session.finishTasksAndInvalidate() }
+
+        if let error {
+            completion(.failure(error))
+            return
+        }
+
+        if !(200..<300).contains(statusCode) {
+            completion(.failure(NSError(domain: "Translator", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Request failed (\(statusCode)): \(responseBody)"])))
+            return
+        }
+
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            completion(.failure(NSError(domain: "Translator", code: 502, userInfo: [NSLocalizedDescriptionKey: "Model returned empty content."])))
+        } else {
+            completion(.success(trimmed))
+        }
+    }
+
+    private func processBufferedLines() {
+        while let newline = lineBuffer.firstIndex(where: { $0 == "\n" }) {
+            let line = String(lineBuffer[..<newline]).trimmingCharacters(in: .whitespacesAndNewlines)
+            lineBuffer.removeSubrange(...newline)
+            handle(line: line)
+        }
+    }
+
+    private func handle(line: String) {
+        guard line.hasPrefix("data:") else { return }
+        let payload = String(line.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if payload == "[DONE]" { return }
+        guard let data = payload.data(using: .utf8),
+              let chunk = try? JSONDecoder().decode(ChatStreamResponse.self, from: data) else { return }
+        let delta = chunk.choices.compactMap { $0.delta?.content }.joined()
+        guard !delta.isEmpty else { return }
+        output += delta
+        onPartial(delta)
+    }
+}
+
 final class TranslationService {
     func process(
         text: String,
@@ -638,15 +822,88 @@ final class TranslationService {
         instruction: String? = nil,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) {
+        do {
+            let request = try makeRequest(text: text, config: config, feature: feature, instruction: instruction, stream: nil)
+            URLSession.shared.dataTask(with: request) { data, response, error in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+
+                guard let http = response as? HTTPURLResponse else {
+                    completion(.failure(NSError(domain: "Translator", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid service response."])))
+                    return
+                }
+
+                guard let data else {
+                    completion(.failure(NSError(domain: "Translator", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Empty response."])))
+                    return
+                }
+
+                guard (200..<300).contains(http.statusCode) else {
+                    let body = String(data: data, encoding: .utf8) ?? ""
+                    completion(.failure(NSError(domain: "Translator", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Request failed (\(http.statusCode)): \(body)"])))
+                    return
+                }
+
+                do {
+                    let result = try JSONDecoder().decode(ChatResponse.self, from: data)
+                    let translated = result.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if translated.isEmpty {
+                        completion(.failure(NSError(domain: "Translator", code: 502, userInfo: [NSLocalizedDescriptionKey: "Model returned empty content."])))
+                    } else {
+                        completion(.success(translated))
+                    }
+                } catch {
+                    completion(.failure(error))
+                }
+            }.resume()
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    func processStreaming(
+        text: String,
+        config: AppConfig,
+        feature: FeatureConfig,
+        instruction: String? = nil,
+        onPartial: @escaping @Sendable (String) -> Void,
+        completion: @escaping @Sendable (Result<String, Error>) -> Void
+    ) -> TextProcessingRun {
+        do {
+            let request = try makeRequest(text: text, config: config, feature: feature, instruction: instruction, stream: true)
+            let delegate = StreamingChatDelegate(onPartial: onPartial, completion: completion)
+            let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+            let task = session.dataTask(with: request)
+            task.resume()
+            return TextProcessingRun(
+                cancelHandler: {
+                    task.cancel()
+                    session.invalidateAndCancel()
+                },
+                retaining: [delegate, session, task]
+            )
+        } catch {
+            completion(.failure(error))
+            return TextProcessingRun(cancelHandler: {})
+        }
+    }
+
+    private func makeRequest(
+        text: String,
+        config: AppConfig,
+        feature: FeatureConfig,
+        instruction: String?,
+        stream: Bool?
+    ) throws -> URLRequest {
         guard !config.apiKey.isEmpty else {
-            completion(.failure(NSError(domain: "Translator", code: 401, userInfo: [NSLocalizedDescriptionKey: "Please set API Key in Settings first."])))
-            return
+            throw NSError(domain: "Translator", code: 401, userInfo: [NSLocalizedDescriptionKey: "Please set API Key in Settings first."])
         }
 
         let urlString = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/chat/completions"
         guard let url = URL(string: urlString) else {
-            completion(.failure(NSError(domain: "Translator", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL."])))
-            return
+            throw NSError(domain: "Translator", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL."])
         }
 
         let prompt = config.resolvedPrompt(for: feature, text: text, instruction: instruction)
@@ -656,56 +913,19 @@ final class TranslationService {
                 .init(role: "system", content: "You are a professional translator."),
                 .init(role: "user", content: prompt)
             ],
-            temperature: 0.2
+            temperature: 0.2,
+            stream: stream
         )
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.addValue(stream == true ? "text/event-stream" : "application/json", forHTTPHeaderField: "Accept")
         request.addValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-
-        do {
-            request.httpBody = try JSONEncoder().encode(requestBody)
-        } catch {
-            completion(.failure(error))
-            return
-        }
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-
-            guard let http = response as? HTTPURLResponse else {
-                completion(.failure(NSError(domain: "Translator", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid service response."])))
-                return
-            }
-
-            guard let data else {
-                completion(.failure(NSError(domain: "Translator", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Empty response."])))
-                return
-            }
-
-            guard (200..<300).contains(http.statusCode) else {
-                let body = String(data: data, encoding: .utf8) ?? ""
-                completion(.failure(NSError(domain: "Translator", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Request failed (\(http.statusCode)): \(body)"])))
-                return
-            }
-
-            do {
-                let result = try JSONDecoder().decode(ChatResponse.self, from: data)
-                let translated = result.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if translated.isEmpty {
-                    completion(.failure(NSError(domain: "Translator", code: 502, userInfo: [NSLocalizedDescriptionKey: "Model returned empty content."])))
-                } else {
-                    completion(.success(translated))
-                }
-            } catch {
-                completion(.failure(error))
-            }
-        }.resume()
+        request.httpBody = try JSONEncoder().encode(requestBody)
+        return request
     }
+
 }
 
 @MainActor
@@ -738,11 +958,8 @@ final class LoginItemManager {
 final class ResultWindowController: NSWindowController, NSWindowDelegate {
     private let textView = NSTextView()
     private let titleLabel = NSTextField(labelWithString: "Jit APP")
-    private let copyButton = NSButton(title: "Copy All", target: nil, action: nil)
-    private let replaceButton = NSButton(title: "Replace", target: nil, action: nil)
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
-    private var onReplace: (() -> Void)?
 
     init() {
         let panel = BubblePanel(
@@ -764,33 +981,18 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: panel)
         panel.delegate = self
 
-        let container = DraggableVisualEffectView()
+        let container = DraggableView()
         container.translatesAutoresizingMaskIntoConstraints = false
-        container.material = .windowBackground
-        container.blendingMode = .withinWindow
-        container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 14
+        container.layer?.cornerRadius = 16
         container.layer?.masksToBounds = true
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.25).cgColor
+        container.layer?.borderColor = LantorVisual.border.cgColor
+        container.layer?.backgroundColor = LantorVisual.surface.cgColor
 
         titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.textColor = LantorVisual.secondaryInk
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        copyButton.target = self
-        copyButton.action = #selector(copyAllText)
-        copyButton.bezelStyle = .rounded
-        copyButton.font = NSFont.systemFont(ofSize: 12)
-        copyButton.translatesAutoresizingMaskIntoConstraints = false
-
-        replaceButton.target = self
-        replaceButton.action = #selector(replaceTapped)
-        replaceButton.bezelStyle = .rounded
-        replaceButton.font = NSFont.systemFont(ofSize: 12)
-        replaceButton.translatesAutoresizingMaskIntoConstraints = false
-        replaceButton.isHidden = true
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -805,7 +1007,7 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
         textView.importsGraphics = false
         textView.allowsUndo = false
         textView.font = NSFont.systemFont(ofSize: 14)
-        textView.textColor = NSColor(calibratedWhite: 0.1, alpha: 1.0)
+        textView.textColor = LantorVisual.ink
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 8, height: 8)
         textView.isVerticallyResizable = true
@@ -822,8 +1024,6 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
         guard let contentView = panel.contentView else { return }
         contentView.addSubview(container)
         container.addSubview(titleLabel)
-        container.addSubview(copyButton)
-        container.addSubview(replaceButton)
         container.addSubview(scroll)
 
         NSLayoutConstraint.activate([
@@ -833,13 +1033,8 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
             container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
 
             titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: replaceButton.leadingAnchor, constant: -8),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -14),
             titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-
-            copyButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            copyButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            replaceButton.trailingAnchor.constraint(equalTo: copyButton.leadingAnchor, constant: -8),
-            replaceButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
@@ -856,39 +1051,28 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
         stopOutsideClickMonitor()
     }
 
-    func showPending(selectedText: String, featureName: String) {
-        replaceButton.isHidden = true
-        onReplace = nil
-        titleLabel.stringValue = "Jit APP · \(featureName)"
-        textView.string = "Selected Text\n\(preview(selectedText))\n\nStatus\nRunning \(featureName)..."
-        presentNearCursor()
-    }
-
-    func showResult(
-        selectedText: String,
-        output: String,
-        featureName: String,
-        outputLabel: String,
-        allowReplace: Bool = false,
-        onReplace: (() -> Void)? = nil
-    ) {
-        replaceButton.isHidden = !allowReplace
-        self.onReplace = onReplace
-        titleLabel.stringValue = "Jit APP · \(featureName)"
-        textView.string = "Selected Text\n\(preview(selectedText))\n\n\(outputLabel)\n\(output)"
-        presentNearCursor()
-    }
-
     func showError(_ message: String, selectedText: String? = nil, featureName: String = "Jit APP") {
-        replaceButton.isHidden = true
-        onReplace = nil
         titleLabel.stringValue = "Jit APP · \(featureName)"
         if let selectedText {
             textView.string = "Selected Text\n\(preview(selectedText))\n\nError\n\(message)"
         } else {
             textView.string = "Error\n\(message)"
         }
+        applyTextStyle()
         presentNearCursor()
+    }
+
+    private func applyTextStyle() {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byCharWrapping
+        let attrs: [NSAttributedString.Key: Any] = [
+            .paragraphStyle: paragraph,
+            .foregroundColor: LantorVisual.ink,
+            .font: NSFont.systemFont(ofSize: 14)
+        ]
+        let ns = textView.string as NSString
+        textView.textStorage?.setAttributes(attrs, range: NSRange(location: 0, length: ns.length))
+        textView.typingAttributes = attrs
     }
 
     private func preview(_ text: String) -> String {
@@ -917,17 +1101,6 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(textView)
         startOutsideClickMonitor()
-    }
-
-    @objc private func copyAllText() {
-        let all = textView.string
-        guard !all.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(all, forType: .string)
-    }
-
-    @objc private func replaceTapped() {
-        onReplace?()
     }
 
     private func startOutsideClickMonitor() {
@@ -1001,21 +1174,21 @@ final class PromptEditorWindowController: NSWindowController {
         scroll.borderType = .bezelBorder
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true
-        scroll.backgroundColor = .white
+        scroll.backgroundColor = .textBackgroundColor
 
         if let editor = scroll.documentView as? NSTextView {
             editor.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-            editor.insertionPointColor = .black
+            editor.insertionPointColor = .textColor
             editor.drawsBackground = true
-            editor.backgroundColor = .white
+            editor.backgroundColor = .textBackgroundColor
             editor.typingAttributes = [
-                .foregroundColor: NSColor.black,
+                .foregroundColor: NSColor.textColor,
                 .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
             ]
             let attr = NSAttributedString(
                 string: currentTemplate,
                 attributes: [
-                    .foregroundColor: NSColor.black,
+                    .foregroundColor: NSColor.textColor,
                     .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
                 ]
             )
@@ -1081,19 +1254,41 @@ final class PromptEditorWindowController: NSWindowController {
 
 @MainActor
 final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
+    private enum PanelPhase {
+        case idle
+        case running
+        case done
+        case error
+    }
+
+    private enum ActionButtonKind {
+        case primary
+        case secondary
+        case warning
+    }
+
     struct Mode {
         let id: String
         let title: String
         let requiresInstruction: Bool
+        let supportsReplace: Bool
         let promptPreview: String
     }
 
     private let commandField = NSTextField(string: "")
-    private let hintLabel = NSTextField(labelWithString: "Type an instruction and press Enter. Esc to cancel.")
+    private let titleLabel = NSTextField(labelWithString: "Jit Action")
+    private let phaseChip = NSTextField(labelWithString: "Ready")
+    private let modeStack = NSStackView()
+    private var modeButtons: [NSButton] = []
+    private let hintLabel = NSTextField(labelWithString: "Select an action, then run it on the selected text.")
+    private let commandContainer = NSView()
     private let outputTextView = NSTextView()
     private let outputScroll = NSScrollView()
+    private let progressIndicator = NSProgressIndicator()
     private let copyButton = NSButton(title: "Copy", target: nil, action: nil)
     private let replaceButton = NSButton(title: "Replace", target: nil, action: nil)
+    private let runButton = NSButton(title: "Run", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var localKeyMonitor: Any?
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
@@ -1102,15 +1297,19 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
     private var currentModeIndex: Int = 0
     private let selectedPreview: String
     private var customInstructionDraft: String = ""
-    var onSubmit: ((String, String?, @escaping @Sendable (Result<String, Error>) -> Void) -> Void)?
+    private var activeRun: TextProcessingRun?
+    private var isRunning = false
+    private var outputDidStream = false
+    private var runGeneration = 0
+    var onSubmit: ((String, String?, @escaping @Sendable (String) -> Void, @escaping @Sendable (Result<String, Error>) -> Void) -> TextProcessingRun?)?
     var onReplace: ((String) -> Void)?
     var onClose: (() -> Void)?
 
     init(selectedText: String, anchor: NSPoint, modes: [Mode], defaultModeID: String = "custom") {
-        self.modes = modes.isEmpty ? [Mode(id: "custom", title: "Custom", requiresInstruction: true, promptPreview: "Custom instruction mode")] : modes
+        self.modes = modes.isEmpty ? [Mode(id: "custom", title: "Custom", requiresInstruction: true, supportsReplace: true, promptPreview: "Custom instruction mode")] : modes
         self.selectedPreview = selectedText.count > 80 ? String(selectedText.prefix(80)) + "..." : selectedText
         let panel = BubblePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 120),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 218),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -1144,14 +1343,56 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         let container = DraggableView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        container.layer?.cornerRadius = 12
+        container.layer?.cornerRadius = 16
         container.layer?.masksToBounds = true
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.25).cgColor
-        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.96, alpha: 1.0).cgColor
+        container.layer?.borderColor = LantorVisual.border.cgColor
+        container.layer?.backgroundColor = LantorVisual.surface.cgColor
+
+        titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = LantorVisual.ink
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        stylePhaseChip(.idle)
+        phaseChip.translatesAutoresizingMaskIntoConstraints = false
+        phaseChip.setContentHuggingPriority(.required, for: .horizontal)
+
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let headerRow = NSStackView(views: [titleLabel, headerSpacer, phaseChip])
+        headerRow.orientation = .horizontal
+        headerRow.spacing = 10
+        headerRow.alignment = .centerY
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+
+        modeStack.orientation = .horizontal
+        modeStack.spacing = 6
+        modeStack.alignment = .centerY
+        modeStack.distribution = .fillEqually
+        modeStack.wantsLayer = true
+        modeStack.layer?.cornerRadius = 10
+        modeStack.layer?.masksToBounds = true
+        modeStack.layer?.backgroundColor = LantorVisual.panel.cgColor
+        modeStack.layer?.borderWidth = 1
+        modeStack.layer?.borderColor = LantorVisual.borderSubtle.cgColor
+        modeStack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+        modeStack.translatesAutoresizingMaskIntoConstraints = false
+        modeButtons = modes.enumerated().map { index, mode in
+            let button = NSButton(title: mode.title, target: self, action: #selector(modeButtonTapped(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier("\(index)")
+            button.isBordered = false
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 8
+            button.layer?.masksToBounds = true
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            modeStack.addArrangedSubview(button)
+            return button
+        }
 
         hintLabel.stringValue = "Run on selected text: \(selectedPreview)"
-        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        hintLabel.textColor = LantorVisual.mutedInk
         hintLabel.lineBreakMode = .byTruncatingTail
         hintLabel.maximumNumberOfLines = 1
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1159,21 +1400,43 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         commandField.placeholderString = "Type instruction..."
         commandField.translatesAutoresizingMaskIntoConstraints = false
         commandField.font = NSFont.systemFont(ofSize: 15)
+        commandField.textColor = LantorVisual.ink
+        commandField.placeholderAttributedString = NSAttributedString(
+            string: "Type instruction...",
+            attributes: [.foregroundColor: LantorVisual.mutedInk]
+        )
+        commandField.drawsBackground = false
+        commandField.isBordered = false
+        commandField.focusRingType = .default
+
+        commandContainer.translatesAutoresizingMaskIntoConstraints = false
+        commandContainer.wantsLayer = true
+        commandContainer.layer?.cornerRadius = 10
+        commandContainer.layer?.masksToBounds = true
+        commandContainer.layer?.backgroundColor = LantorVisual.input.cgColor
+        commandContainer.layer?.borderWidth = 1
+        commandContainer.layer?.borderColor = LantorVisual.border.cgColor
+        commandContainer.addSubview(commandField)
 
         outputScroll.translatesAutoresizingMaskIntoConstraints = false
         outputScroll.hasVerticalScroller = true
-        outputScroll.borderType = .bezelBorder
+        outputScroll.borderType = .noBorder
         outputScroll.drawsBackground = true
-        outputScroll.backgroundColor = .textBackgroundColor
+        outputScroll.backgroundColor = LantorVisual.panel
+        outputScroll.wantsLayer = true
+        outputScroll.layer?.cornerRadius = 12
+        outputScroll.layer?.masksToBounds = true
+        outputScroll.layer?.borderWidth = 1
+        outputScroll.layer?.borderColor = LantorVisual.borderSubtle.cgColor
         outputScroll.isHidden = true
 
-        outputTextView.isEditable = true
+        outputTextView.isEditable = false
         outputTextView.isSelectable = true
         outputTextView.drawsBackground = true
-        outputTextView.backgroundColor = NSColor(calibratedWhite: 0.98, alpha: 1.0)
+        outputTextView.backgroundColor = LantorVisual.panel
         outputTextView.font = NSFont.systemFont(ofSize: 14)
-        outputTextView.textColor = NSColor(calibratedWhite: 0.12, alpha: 1.0)
-        outputTextView.insertionPointColor = NSColor(calibratedWhite: 0.1, alpha: 1.0)
+        outputTextView.textColor = LantorVisual.ink
+        outputTextView.insertionPointColor = LantorVisual.accent
         outputTextView.isRichText = false
         outputTextView.importsGraphics = false
         outputTextView.frame = NSRect(x: 0, y: 0, width: 520, height: 260)
@@ -1186,7 +1449,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
                 p.lineBreakMode = .byCharWrapping
                 return p
             }(),
-            .foregroundColor: NSColor(calibratedWhite: 0.12, alpha: 1.0),
+            .foregroundColor: LantorVisual.ink,
             .font: NSFont.systemFont(ofSize: 14)
         ]
         outputTextView.textContainerInset = NSSize(width: 6, height: 6)
@@ -1198,24 +1461,49 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         outputTextView.textContainer?.lineFragmentPadding = 2
         outputScroll.documentView = outputTextView
 
+        progressIndicator.style = .spinning
+        progressIndicator.controlSize = .small
+        progressIndicator.isDisplayedWhenStopped = false
+        progressIndicator.translatesAutoresizingMaskIntoConstraints = false
+        progressIndicator.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        progressIndicator.heightAnchor.constraint(equalToConstant: 18).isActive = true
+
         copyButton.target = self
         copyButton.action = #selector(copyTapped)
-        copyButton.bezelStyle = .rounded
         copyButton.translatesAutoresizingMaskIntoConstraints = false
         copyButton.isHidden = true
+        styleActionButton(copyButton, kind: .secondary, width: 72)
 
         replaceButton.target = self
         replaceButton.action = #selector(replaceTapped)
-        replaceButton.bezelStyle = .rounded
         replaceButton.translatesAutoresizingMaskIntoConstraints = false
         replaceButton.isHidden = true
+        styleActionButton(replaceButton, kind: .secondary, width: 82)
+
+        runButton.target = self
+        runButton.action = #selector(runTapped)
+        runButton.translatesAutoresizingMaskIntoConstraints = false
+        styleActionButton(runButton, kind: .primary, width: 96)
+
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelTapped)
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+        styleActionButton(cancelButton, kind: .secondary, width: 84)
+
+        let actionRow = NSStackView(views: [progressIndicator, copyButton, replaceButton, cancelButton, runButton])
+        actionRow.orientation = .horizontal
+        actionRow.spacing = 8
+        actionRow.alignment = .centerY
+        actionRow.distribution = .gravityAreas
+        actionRow.translatesAutoresizingMaskIntoConstraints = false
 
         contentView.addSubview(container)
+        container.addSubview(headerRow)
+        container.addSubview(modeStack)
         container.addSubview(hintLabel)
-        container.addSubview(commandField)
+        container.addSubview(commandContainer)
         container.addSubview(outputScroll)
-        container.addSubview(copyButton)
-        container.addSubview(replaceButton)
+        container.addSubview(actionRow)
 
         NSLayoutConstraint.activate([
             container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
@@ -1223,26 +1511,141 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
             container.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
             container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
 
-            hintLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            hintLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            hintLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            headerRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            headerRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            headerRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 14),
+            headerRow.heightAnchor.constraint(equalToConstant: 24),
 
-            commandField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            commandField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            commandField.topAnchor.constraint(equalTo: hintLabel.bottomAnchor, constant: 8),
-            commandField.heightAnchor.constraint(equalToConstant: 32),
+            modeStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            modeStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            modeStack.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 12),
+            modeStack.heightAnchor.constraint(equalToConstant: 36),
 
-            outputScroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            outputScroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            outputScroll.topAnchor.constraint(equalTo: commandField.bottomAnchor, constant: 8),
-            outputScroll.bottomAnchor.constraint(equalTo: copyButton.topAnchor, constant: -8),
+            hintLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            hintLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            hintLabel.topAnchor.constraint(equalTo: modeStack.bottomAnchor, constant: 10),
 
-            replaceButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            replaceButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+            commandContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            commandContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            commandContainer.topAnchor.constraint(equalTo: hintLabel.bottomAnchor, constant: 8),
+            commandContainer.heightAnchor.constraint(equalToConstant: 36),
 
-            copyButton.trailingAnchor.constraint(equalTo: replaceButton.leadingAnchor, constant: -8),
-            copyButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10)
+            commandField.leadingAnchor.constraint(equalTo: commandContainer.leadingAnchor, constant: 11),
+            commandField.trailingAnchor.constraint(equalTo: commandContainer.trailingAnchor, constant: -11),
+            commandField.centerYAnchor.constraint(equalTo: commandContainer.centerYAnchor),
+
+            outputScroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            outputScroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            outputScroll.topAnchor.constraint(equalTo: commandContainer.bottomAnchor, constant: 10),
+            outputScroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -10),
+
+            actionRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            actionRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            actionRow.heightAnchor.constraint(equalToConstant: 32)
         ])
+    }
+
+    private func styleActionButton(_ button: NSButton, kind: ActionButtonKind, title: String? = nil, width: CGFloat? = nil) {
+        if let title {
+            button.title = title
+        }
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 8
+        button.layer?.masksToBounds = true
+        button.layer?.borderWidth = 1
+
+        let background: NSColor
+        let border: NSColor
+        let foreground: NSColor
+        let weight: NSFont.Weight
+        switch kind {
+        case .primary:
+            background = LantorVisual.accent
+            border = LantorVisual.accent
+            foreground = LantorVisual.accentInk
+            weight = .semibold
+        case .secondary:
+            background = LantorVisual.control
+            border = LantorVisual.border
+            foreground = LantorVisual.secondaryInk
+            weight = .medium
+        case .warning:
+            background = LantorVisual.warningSoft
+            border = LantorVisual.warningInk.withAlphaComponent(0.32)
+            foreground = LantorVisual.warningInk
+            weight = .semibold
+        }
+
+        button.layer?.backgroundColor = background.cgColor
+        button.layer?.borderColor = border.cgColor
+        button.attributedTitle = NSAttributedString(
+            string: button.title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: weight),
+                .foregroundColor: foreground
+            ]
+        )
+        button.alphaValue = button.isEnabled ? 1 : 0.52
+        if let width {
+            button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        }
+    }
+
+    private func stylePhaseChip(_ phase: PanelPhase) {
+        let text: String
+        let background: NSColor
+        let foreground: NSColor
+        switch phase {
+        case .idle:
+            text = "Ready"
+            background = LantorVisual.accentSoft
+            foreground = LantorVisual.accent
+        case .running:
+            text = "Streaming"
+            background = LantorVisual.thinkingSoft
+            foreground = LantorVisual.thinkingInk
+        case .done:
+            text = "Done"
+            background = LantorVisual.successSoft
+            foreground = LantorVisual.successInk
+        case .error:
+            text = "Error"
+            background = LantorVisual.errorSoft
+            foreground = LantorVisual.errorInk
+        }
+        phaseChip.stringValue = text
+        phaseChip.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        phaseChip.textColor = foreground
+        phaseChip.alignment = .center
+        phaseChip.wantsLayer = true
+        phaseChip.layer?.cornerRadius = 8
+        phaseChip.layer?.masksToBounds = true
+        phaseChip.layer?.backgroundColor = background.cgColor
+        phaseChip.translatesAutoresizingMaskIntoConstraints = false
+        if phaseChip.constraints.first(where: { $0.identifier == "phaseChipWidth" }) == nil {
+            let width = phaseChip.widthAnchor.constraint(greaterThanOrEqualToConstant: 64)
+            width.identifier = "phaseChipWidth"
+            width.isActive = true
+            phaseChip.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        }
+    }
+
+    private func styleModeButtons() {
+        for (index, button) in modeButtons.enumerated() {
+            let selected = index == currentModeIndex
+            button.layer?.backgroundColor = (selected ? LantorVisual.accentSoft : NSColor.clear).cgColor
+            button.layer?.borderWidth = selected ? 1 : 0
+            button.layer?.borderColor = LantorVisual.accentSoftBorder.cgColor
+            button.alphaValue = button.isEnabled ? 1 : 0.52
+            button.attributedTitle = NSAttributedString(
+                string: modes[index].title,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .medium),
+                    .foregroundColor: selected ? LantorVisual.accent : LantorVisual.secondaryInk
+                ]
+            )
+        }
     }
 
     func focus() {
@@ -1263,33 +1666,57 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func runTapped() {
+        guard !isRunning else { return }
         let mode = modes[currentModeIndex]
         let rawInstruction = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if mode.requiresInstruction && rawInstruction.isEmpty { return }
+        if mode.requiresInstruction && rawInstruction.isEmpty {
+            NSSound.beep()
+            return
+        }
         let instruction = mode.requiresInstruction ? rawInstruction : nil
-        setLoadingState(true)
-        onSubmit?(mode.id, instruction) { [weak self] result in
-            guard let self else { return }
-            Task { @MainActor in
-                self.setLoadingState(false)
-                self.expandForOutputIfNeeded()
-                switch result {
-                case .success(let output):
-                    self.setOutputText(output)
-                    self.window?.makeFirstResponder(self.outputTextView)
-                    self.copyButton.isHidden = false
-                    self.replaceButton.isHidden = false
-                case .failure(let error):
-                    self.setOutputText("Failed: \(error.localizedDescription)")
-                    self.window?.makeFirstResponder(self.outputTextView)
-                    self.copyButton.isHidden = true
-                    self.replaceButton.isHidden = true
+        startRunning(mode: mode)
+
+        runGeneration += 1
+        let generation = runGeneration
+        activeRun = onSubmit?(
+            mode.id,
+            instruction,
+            { [weak self] delta in
+                Task { @MainActor in
+                    self?.appendOutput(delta, generation: generation)
+                }
+            },
+            { [weak self] result in
+                Task { @MainActor in
+                    self?.finishRunning(result: result, mode: mode, generation: generation)
                 }
             }
+        )
+
+        if activeRun == nil {
+            finishRunning(
+                result: .failure(NSError(domain: "JitAPP", code: 500, userInfo: [NSLocalizedDescriptionKey: "No processing handler is configured."])),
+                mode: mode,
+                generation: generation
+            )
         }
     }
 
     @objc private func cancelTapped() {
+        if isRunning {
+            runGeneration += 1
+            activeRun?.cancel()
+            activeRun = nil
+            isRunning = false
+            setRunningState(false, mode: modes[currentModeIndex])
+            setOutputText("Canceled.")
+            hintLabel.stringValue = "Canceled."
+            stylePhaseChip(.idle)
+            copyButton.isHidden = true
+            replaceButton.isHidden = true
+            window?.makeFirstResponder(commandField)
+            return
+        }
         window?.close()
     }
 
@@ -1304,9 +1731,17 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         guard !output.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(output, forType: .string)
+        styleActionButton(copyButton, kind: .secondary, title: "Copied")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            guard let self else { return }
+            self.styleActionButton(self.copyButton, kind: .secondary, title: "Copy")
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
+        activeRun?.cancel()
+        activeRun = nil
+        isRunning = false
         stopOutsideClickMonitor()
         if let localKeyMonitor {
             NSEvent.removeMonitor(localKeyMonitor)
@@ -1322,15 +1757,15 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
                 self.cancelTapped()
                 return nil
             }
-            if event.keyCode == 36 || event.keyCode == 76 { // Return / Enter
+            if !self.isRunning && (event.keyCode == 36 || event.keyCode == 76) { // Return / Enter
                 self.runTapped()
                 return nil
             }
-            if event.keyCode == 126 { // Up
+            if !self.isRunning && event.keyCode == 126 { // Up
                 self.moveMode(delta: -1)
                 return nil
             }
-            if event.keyCode == 125 { // Down
+            if !self.isRunning && event.keyCode == 125 { // Down
                 self.moveMode(delta: 1)
                 return nil
             }
@@ -1357,17 +1792,73 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func setLoadingState(_ loading: Bool) {
-        let mode = modes[currentModeIndex]
-        commandField.isEnabled = !loading && mode.requiresInstruction
-        commandField.isEditable = mode.requiresInstruction
-        copyButton.isEnabled = !loading
-        replaceButton.isEnabled = !loading
-        if loading {
-            expandForOutputIfNeeded()
-            setOutputText("Processing...")
+    private func startRunning(mode: Mode) {
+        isRunning = true
+        outputDidStream = false
+        expandForOutputIfNeeded()
+        setOutputText("Waiting for \(mode.title)...")
+        hintLabel.stringValue = "Running \(mode.title)..."
+        stylePhaseChip(.running)
+        setRunningState(true, mode: mode)
+    }
+
+    private func finishRunning(result: Result<String, Error>, mode: Mode, generation: Int) {
+        guard generation == runGeneration else { return }
+        activeRun = nil
+        isRunning = false
+        setRunningState(false, mode: mode)
+        expandForOutputIfNeeded()
+
+        switch result {
+        case .success(let output):
+            let displayedOutput = outputDidStream ? outputTextView.string : output
+            setOutputText(displayedOutput)
+            hintLabel.stringValue = "Completed \(mode.title)."
+            stylePhaseChip(.done)
+            outputTextView.isEditable = true
+            window?.makeFirstResponder(outputTextView)
+            copyButton.isHidden = false
+            replaceButton.isHidden = !mode.supportsReplace
+        case .failure(let error):
+            if error is CancellationError { return }
+            setOutputText("Failed: \(error.localizedDescription)")
+            hintLabel.stringValue = "\(mode.title) failed."
+            stylePhaseChip(.error)
+            outputTextView.isEditable = false
+            window?.makeFirstResponder(outputTextView)
             copyButton.isHidden = true
             replaceButton.isHidden = true
+        }
+    }
+
+    private func appendOutput(_ delta: String, generation: Int) {
+        guard generation == runGeneration, isRunning else { return }
+        let current = outputDidStream ? outputTextView.string : ""
+        outputDidStream = true
+        setOutputText(current + delta, emptyPlaceholder: "")
+        scrollOutputToEnd()
+    }
+
+    private func setRunningState(_ running: Bool, mode: Mode) {
+        modeButtons.forEach { $0.isEnabled = !running }
+        commandField.isEnabled = !running && mode.requiresInstruction
+        commandField.isEditable = !running && mode.requiresInstruction
+        outputTextView.isEditable = false
+        copyButton.isEnabled = !running
+        replaceButton.isEnabled = !running
+        runButton.isEnabled = !running
+        cancelButton.isEnabled = true
+        styleActionButton(cancelButton, kind: running ? .warning : .secondary, title: running ? "Stop" : "Cancel")
+        styleActionButton(runButton, kind: .primary)
+        styleActionButton(copyButton, kind: .secondary)
+        styleActionButton(replaceButton, kind: .secondary)
+        styleModeButtons()
+        if running {
+            progressIndicator.startAnimation(nil)
+            copyButton.isHidden = true
+            replaceButton.isHidden = true
+        } else {
+            progressIndicator.stopAnimation(nil)
         }
     }
 
@@ -1382,31 +1873,52 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         refreshModeUI()
     }
 
-    private func refreshModeUI() {
-        let mode = modes[currentModeIndex]
-        hintLabel.stringValue = "Mode: \(mode.title)  (↑/↓ switch) · Enter run · Esc close\nSelected: \(selectedPreview)"
-        hintLabel.maximumNumberOfLines = 2
-        if mode.requiresInstruction {
-            commandField.isEditable = true
-            commandField.isEnabled = true
-            commandField.placeholderString = "Instruction for \(mode.title)..."
-            commandField.stringValue = customInstructionDraft
-        } else {
-            commandField.isEditable = false
-            commandField.isEnabled = false
-            commandField.placeholderString = ""
-            commandField.stringValue = "System Prompt: \(mode.promptPreview)"
+    @objc private func modeButtonTapped(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, let selected = Int(raw) else { return }
+        guard selected >= 0, selected < modes.count else { return }
+        let oldMode = modes[currentModeIndex]
+        if oldMode.requiresInstruction {
+            customInstructionDraft = commandField.stringValue
+        }
+        currentModeIndex = selected
+        refreshModeUI()
+        if modes[currentModeIndex].requiresInstruction {
+            window?.makeFirstResponder(commandField)
         }
     }
 
-    private func setOutputText(_ text: String) {
+    private func refreshModeUI() {
+        let mode = modes[currentModeIndex]
+        hintLabel.stringValue = "Selected: \(selectedPreview)"
+        hintLabel.maximumNumberOfLines = 2
+        styleModeButtons()
+        commandContainer.layer?.backgroundColor = (mode.requiresInstruction ? LantorVisual.input : LantorVisual.panel).cgColor
+        if mode.requiresInstruction {
+            commandField.isEditable = true
+            commandField.isEnabled = true
+            commandField.placeholderAttributedString = NSAttributedString(
+                string: "Instruction for \(mode.title)...",
+                attributes: [.foregroundColor: LantorVisual.mutedInk]
+            )
+            commandField.stringValue = customInstructionDraft
+            styleActionButton(runButton, kind: .primary, title: "Run")
+        } else {
+            commandField.isEditable = false
+            commandField.isEnabled = false
+            commandField.placeholderAttributedString = NSAttributedString(string: "")
+            commandField.stringValue = "Uses saved prompt: \(mode.promptPreview)"
+            styleActionButton(runButton, kind: .primary, title: "Run \(mode.title)")
+        }
+    }
+
+    private func setOutputText(_ text: String, emptyPlaceholder: String = "(No content returned)") {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let display = normalized.isEmpty ? "(No content returned)" : text
+        let display = normalized.isEmpty ? emptyPlaceholder : text
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byCharWrapping
         let attrs: [NSAttributedString.Key: Any] = [
             .paragraphStyle: paragraph,
-            .foregroundColor: NSColor(calibratedWhite: 0.12, alpha: 1.0),
+            .foregroundColor: LantorVisual.ink,
             .font: NSFont.systemFont(ofSize: 14)
         ]
         // Force text container width to visible viewport so wrapping always follows bubble width.
@@ -1420,6 +1932,11 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         outputTextView.typingAttributes = attrs
     }
 
+    private func scrollOutputToEnd() {
+        let range = NSRange(location: (outputTextView.string as NSString).length, length: 0)
+        outputTextView.scrollRangeToVisible(range)
+    }
+
     private func expandForOutputIfNeeded() {
         guard let window, !expanded else {
             outputScroll.isHidden = false
@@ -1428,8 +1945,8 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         expanded = true
         outputScroll.isHidden = false
         var frame = window.frame
-        frame.origin.y -= 280
-        frame.size.height += 280
+        frame.origin.y -= 300
+        frame.size.height += 300
         window.setFrame(frame, display: true, animate: true)
     }
 
@@ -1458,6 +1975,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         static let cardPadding: CGFloat = 18
         static let cardCornerRadius: CGFloat = 14
         static let fieldCornerRadius: CGFloat = 8
+        static let onboardingContentWidth: CGFloat = 580
 
         static let sidebarSelection = NSColor.controlAccentColor.withAlphaComponent(0.16)
         static let sidebarText = NSColor.labelColor
@@ -1479,6 +1997,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private enum SettingsSection: String, CaseIterable {
+        case getStarted
         case connection
         case entry
         case prompts
@@ -1486,24 +2005,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         var title: String {
             switch self {
-            case .connection: return "Connection"
-            case .entry: return "Entry Hotkey"
-            case .prompts: return "Prompts"
+            case .getStarted: return "Get Started"
+            case .connection: return "AI Model"
+            case .entry: return "Shortcut"
+            case .prompts: return "Actions"
             case .permissions: return "Permissions"
             }
         }
 
         var subtitle: String {
             switch self {
-            case .connection: return "API endpoint, key, and model"
-            case .entry: return "Option+A trigger behavior"
-            case .prompts: return "Mode prompt templates"
+            case .getStarted: return "Setup checklist and next step"
+            case .connection: return "Endpoint, API key, and model"
+            case .entry: return "Global hotkey for the action palette"
+            case .prompts: return "Translate, refine, and custom prompts"
             case .permissions: return "System access requirements"
             }
         }
 
         var symbol: String {
             switch self {
+            case .getStarted: return "checklist"
             case .connection: return "network"
             case .entry: return "command"
             case .prompts: return "text.bubble"
@@ -1544,7 +2066,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private let baseURLField = NSTextField(string: "")
-    private let apiKeyField = NSTextField(string: "")
+    private let apiKeyField = NSSecureTextField(string: "")
     private let modelField = NSTextField(string: "")
     private let targetLanguageField = NSTextField(string: "")
     private var featureConfigs: [FeatureConfig] = []
@@ -1601,6 +2123,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window?.makeFirstResponder(apiKeyField)
     }
 
+    func showGetStartedSection() {
+        showSection(.getStarted, animated: false)
+    }
+
+    func showPermissionsSection() {
+        showSection(.permissions, animated: false)
+    }
+
+    func refreshPermissionStatus(showFooter: Bool = false) {
+        sectionPages[.getStarted] = nil
+        sectionPages[.permissions] = nil
+        if currentSection == .getStarted || currentSection == .permissions {
+            showSection(currentSection, animated: false, clearFooter: false)
+        }
+
+        guard showFooter else { return }
+        let report = onDiagnosePermissions?() ?? ""
+        if report.isEmpty {
+            setFooterStatus("Permission status refreshed.", kind: .neutral)
+            return
+        }
+
+        let allAllowed = report.contains("Accessibility: Allowed") &&
+            report.contains("Input Monitoring (ListenEvent): Allowed") &&
+            report.contains("Event Posting (PostEvent): Allowed")
+        if allAllowed {
+            setFooterStatus("Permission status refreshed: all required permissions are allowed.", kind: .success)
+        } else {
+            setFooterStatus("Permission status refreshed: some permissions are still missing.", kind: .error)
+        }
+    }
+
     private func configureInputFields() {
         [baseURLField, apiKeyField, modelField, targetLanguageField].forEach { field in
             field.font = NSFont.systemFont(ofSize: 14)
@@ -1620,7 +2174,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         sectionPages.removeAll()
         featureControls.removeAll()
         connectionAdvancedStack = nil
-        currentSection = .connection
+        currentSection = .getStarted
 
         let split = NSStackView()
         split.orientation = .horizontal
@@ -1641,7 +2195,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         ])
 
         DispatchQueue.main.async { [weak self] in
-            self?.showSection(.connection, animated: false)
+            self?.showSection(.getStarted, animated: false)
         }
     }
 
@@ -1666,7 +2220,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         iconView.heightAnchor.constraint(equalToConstant: 36).isActive = true
 
         let appTitle = label("Jit APP", font: NSFont.systemFont(ofSize: 17, weight: .semibold), color: Theme.sidebarText)
-        let appSubtitle = label("Preferences", font: Theme.bodyFont, color: Theme.sidebarSecondaryText)
+        let appSubtitle = label("Setup & Preferences", font: Theme.bodyFont, color: Theme.sidebarSecondaryText)
         let identityStack = NSStackView(views: [appTitle, appSubtitle])
         identityStack.orientation = .vertical
         identityStack.spacing = 2
@@ -1730,11 +2284,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         showSection(section, animated: true)
     }
 
-    private func showSection(_ section: SettingsSection, animated: Bool) {
+    private func showSection(_ section: SettingsSection, animated: Bool, clearFooter: Bool = true) {
         stopHotkeyCapture()
         currentSection = section
         updateSidebarSelection(section)
-        setFooterStatus(nil)
+        if clearFooter {
+            setFooterStatus(nil)
+        }
         detailTitleLabel?.stringValue = section.title
         detailSubtitleLabel?.stringValue = section.subtitle
 
@@ -1766,6 +2322,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         let content: NSView
         switch section {
+        case .getStarted:
+            content = getStartedSectionView()
         case .connection:
             content = connectionSectionView()
         case .entry:
@@ -1780,7 +2338,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         pageStack.orientation = .vertical
         pageStack.alignment = .leading
         pageStack.spacing = Theme.sectionSpacing
-        if section == .prompts {
+        if section == .getStarted || section == .prompts {
             pageStack.addArrangedSubview(content)
         } else {
             pageStack.addArrangedSubview(contentCard(content))
@@ -1910,6 +2468,239 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         return detail
     }
 
+    private var hasDraftConnectionSettings: Bool {
+        !baseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var requiredPermissionsAllowed: Bool {
+        AXIsProcessTrusted() &&
+            CGPreflightListenEventAccess() &&
+            CGPreflightPostEventAccess()
+    }
+
+    private var setupIsReady: Bool {
+        hasDraftConnectionSettings && requiredPermissionsAllowed
+    }
+
+    private var completedSetupStepCount: Int {
+        var count = 0
+        if hasDraftConnectionSettings { count += 1 }
+        if requiredPermissionsAllowed { count += 1 }
+        if setupIsReady { count += 1 }
+        return count
+    }
+
+    private var actionPaletteShortcutText: String {
+        guard let entryFeature = featureConfigs.first(where: { $0.id == "custom" }) else {
+            return "the action palette shortcut"
+        }
+        return shortcutDisplay(
+            key: entryFeature.hotkeyKey,
+            option: entryFeature.hotkeyOption,
+            command: entryFeature.hotkeyCommand,
+            control: entryFeature.hotkeyControl,
+            shift: entryFeature.hotkeyShift
+        )
+    }
+
+    private func getStartedSectionView() -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 12
+        container.alignment = .leading
+
+        let completedCount = completedSetupStepCount
+        let ready = setupIsReady
+        container.addArrangedSubview(onboardingHeroView(completedCount: completedCount, ready: ready))
+        container.addArrangedSubview(setupProgressView(completedCount: completedCount))
+
+        let pasteKeyButton = onboardingButton("Paste Key", action: #selector(pasteAPIKey), primary: !hasDraftConnectionSettings, width: 92)
+        let aiModelButton = onboardingButton("AI Model", action: #selector(openConnectionSectionTapped), width: 92)
+        let testButton = onboardingButton("Test", action: #selector(testTapped), width: 76, enabled: hasDraftConnectionSettings)
+        container.addArrangedSubview(onboardingStepView(
+            number: 1,
+            title: "Connect AI",
+            detail: hasDraftConnectionSettings
+                ? "Base URL, API key, and model are filled. Test once before relying on the palette."
+                : "Defaults cover Base URL and Model. Paste your API key, save, then test the connection.",
+            status: hasDraftConnectionSettings ? "Configured" : "Required",
+            complete: hasDraftConnectionSettings,
+            actions: [pasteKeyButton, aiModelButton, testButton]
+        ))
+
+        let grantButton = onboardingButton("Grant Access", action: #selector(requestPermissionsTapped), primary: !requiredPermissionsAllowed, width: 112)
+        let permissionsButton = onboardingButton("Permissions", action: #selector(openPermissionsSectionTapped), width: 104)
+        container.addArrangedSubview(onboardingStepView(
+            number: 2,
+            title: "Grant System Access",
+            detail: permissionSummaryText(),
+            status: requiredPermissionsAllowed ? "Allowed" : "Required",
+            complete: requiredPermissionsAllowed,
+            actions: [grantButton, permissionsButton]
+        ))
+
+        let doneButton = onboardingButton("Done", action: #selector(closeSettingsTapped), primary: ready, width: 76, enabled: ready)
+        let shortcutButton = onboardingButton("Shortcut", action: #selector(openShortcutSectionTapped), width: 90)
+        let actionsButton = onboardingButton("Actions", action: #selector(openActionsSectionTapped), width: 82)
+        container.addArrangedSubview(onboardingStepView(
+            number: 3,
+            title: "Try the Palette",
+            detail: ready
+                ? "Select text in any app, press \(actionPaletteShortcutText), choose an action, then run it."
+                : "Finish connection and permissions first. The default palette shortcut is \(actionPaletteShortcutText).",
+            status: ready ? "Ready" : "Locked",
+            complete: ready,
+            actions: [doneButton, shortcutButton, actionsButton]
+        ))
+
+        let wrapper = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: 18),
+            container.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor, constant: -18),
+            container.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            container.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor)
+        ])
+        return wrapper
+    }
+
+    private func onboardingHeroView(completedCount: Int, ready: Bool) -> NSView {
+        let title = label(ready ? "Jit is ready." : "Finish setup to use Jit.", font: Theme.largeTitleFont, color: .labelColor)
+        let subtitle = label(
+            ready
+                ? "The app can stay in the menu bar. Use the palette shortcut on selected text in any app."
+                : "Follow the checklist once. Required settings and permissions are separated from optional preferences.",
+            font: Theme.bodyFont,
+            color: .secondaryLabelColor
+        )
+        subtitle.maximumNumberOfLines = 2
+        subtitle.lineBreakMode = .byWordWrapping
+
+        let textStack = NSStackView(views: [title, subtitle])
+        textStack.orientation = .vertical
+        textStack.spacing = 4
+        textStack.alignment = .leading
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [textStack, spacer, statusChip(text: ready ? "Ready" : "\(completedCount)/3", allowed: ready)])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        row.widthAnchor.constraint(equalToConstant: Theme.onboardingContentWidth).isActive = true
+        return row
+    }
+
+    private func setupProgressView(completedCount: Int) -> NSView {
+        let progress = NSProgressIndicator()
+        progress.style = .bar
+        progress.isIndeterminate = false
+        progress.minValue = 0
+        progress.maxValue = 3
+        progress.doubleValue = Double(completedCount)
+        progress.controlSize = .small
+        progress.translatesAutoresizingMaskIntoConstraints = false
+        progress.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
+
+        let caption = label("\(completedCount) of 3 setup steps complete", font: Theme.captionFont, color: .secondaryLabelColor)
+        caption.alignment = .right
+        caption.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [progress, caption])
+        row.orientation = .horizontal
+        row.spacing = 12
+        row.alignment = .centerY
+        row.widthAnchor.constraint(equalToConstant: Theme.onboardingContentWidth).isActive = true
+        return row
+    }
+
+    private func onboardingStepView(
+        number: Int,
+        title: String,
+        detail: String,
+        status: String,
+        complete: Bool,
+        actions: [NSButton]
+    ) -> NSView {
+        let icon = NSImageView()
+        let symbolName = complete ? "checkmark.circle.fill" : "\(number).circle"
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
+            icon.image = image
+            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+            icon.contentTintColor = complete ? Theme.chipGreenText : .secondaryLabelColor
+        }
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 24).isActive = true
+
+        let titleLabel = label(title, font: NSFont.systemFont(ofSize: 14, weight: .semibold), color: .labelColor)
+        let detailLabel = label(detail, font: Theme.captionFont, color: .secondaryLabelColor)
+        detailLabel.maximumNumberOfLines = 2
+        detailLabel.lineBreakMode = .byWordWrapping
+
+        let textStack = NSStackView(views: [titleLabel, detailLabel])
+        textStack.orientation = .vertical
+        textStack.spacing = 3
+        textStack.alignment = .leading
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let header = NSStackView(views: [icon, textStack, spacer, statusChip(text: status, allowed: complete)])
+        header.orientation = .horizontal
+        header.spacing = 10
+        header.alignment = .centerY
+        header.distribution = .fill
+
+        let body = NSStackView(views: [header])
+        body.orientation = .vertical
+        body.spacing = 10
+        body.alignment = .leading
+
+        if !actions.isEmpty {
+            let actionRow = NSStackView(views: actions)
+            actionRow.orientation = .horizontal
+            actionRow.spacing = 8
+            actionRow.alignment = .centerY
+            body.addArrangedSubview(actionRow)
+        }
+
+        let card = styledRow(body)
+        card.widthAnchor.constraint(equalToConstant: Theme.onboardingContentWidth).isActive = true
+        return card
+    }
+
+    private func onboardingButton(
+        _ title: String,
+        action: Selector,
+        primary: Bool = false,
+        width: CGFloat,
+        enabled: Bool = true
+    ) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        if primary {
+            stylePrimaryButton(button)
+        } else {
+            styleSecondaryButton(button)
+        }
+        button.isEnabled = enabled
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return button
+    }
+
+    private func permissionSummaryText() -> String {
+        let items = [
+            "Accessibility \(AXIsProcessTrusted() ? "Allowed" : "Required")",
+            "Input Monitoring \(CGPreflightListenEventAccess() ? "Allowed" : "Required")",
+            "Post Events \(CGPreflightPostEventAccess() ? "Allowed" : "Required")"
+        ]
+        return items.joined(separator: " · ")
+    }
+
     private func connectionSectionView() -> NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -1960,8 +2751,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         container.spacing = 12
         container.alignment = .leading
 
-        let title = label("Entry Shortcut", font: Theme.sectionTitleFont, color: .labelColor)
-        let subtitle = label("Use one shortcut to open Jit on selected text.", font: Theme.captionFont, color: .secondaryLabelColor)
+        let title = label("Action Palette Shortcut", font: Theme.sectionTitleFont, color: .labelColor)
+        let subtitle = label("Use one global shortcut to choose Translate, Refine, or Custom for the selected text.", font: Theme.captionFont, color: .secondaryLabelColor)
         subtitle.maximumNumberOfLines = 2
         let header = NSStackView(views: [title, subtitle])
         header.orientation = .vertical
@@ -2004,8 +2795,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         container.spacing = 12
         container.alignment = .leading
         container.addArrangedSubview(sectionHeader(
-            title: "Prompt Templates",
-            subtitle: "Edit how each mode transforms selected text."
+            title: "AI Actions",
+            subtitle: "Tune the three actions available in the floating palette."
         ))
 
         for feature in featureConfigs {
@@ -2070,7 +2861,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         ))
 
         let guide = label(
-            "Quick Fix: 1) Request All, 2) Open the matching System Settings page, 3) enable Jit APP, 4) Refresh Status.",
+            "Quick Fix: 1) Grant Access, 2) enable Jit APP in System Settings if prompted, 3) return here and the status will refresh.",
             font: Theme.captionFont,
             color: .secondaryLabelColor
         )
@@ -2081,7 +2872,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         actionTitle.setContentCompressionResistancePriority(.required, for: .vertical)
         container.addArrangedSubview(actionTitle)
 
-        let requestPermissionButton = NSButton(title: "Request All", target: self, action: #selector(requestPermissionsTapped))
+        let requestPermissionButton = NSButton(title: "Grant Access", target: self, action: #selector(requestPermissionsTapped))
         stylePrimaryButton(requestPermissionButton)
         let refreshPermissionButton = NSButton(title: "Refresh Status", target: self, action: #selector(refreshPermissionStatusTapped))
         styleSecondaryButton(refreshPermissionButton)
@@ -2519,6 +3310,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         stopHotkeyCapture()
         guard let config = buildConfigOrShowError() else { return }
         onSave?(config)
+        sectionPages[.getStarted] = nil
+        if currentSection == .getStarted {
+            showSection(.getStarted, animated: false, clearFooter: false)
+        }
         setFooterStatus("Saved.", kind: .success)
     }
 
@@ -2543,10 +3338,35 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func pasteAPIKey() {
         if let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             apiKeyField.stringValue = text
+            sectionPages[.getStarted] = nil
+            if currentSection == .getStarted {
+                showSection(.getStarted, animated: false, clearFooter: false)
+            }
             setFooterStatus("API key pasted.", kind: .success)
         } else {
             setFooterStatus("No usable text found in clipboard.", kind: .error)
         }
+    }
+
+    @objc private func openConnectionSectionTapped() {
+        showSection(.connection, animated: true)
+        window?.makeFirstResponder(apiKeyField)
+    }
+
+    @objc private func openPermissionsSectionTapped() {
+        showSection(.permissions, animated: true)
+    }
+
+    @objc private func openShortcutSectionTapped() {
+        showSection(.entry, animated: true)
+    }
+
+    @objc private func openActionsSectionTapped() {
+        showSection(.prompts, animated: true)
+    }
+
+    @objc private func closeSettingsTapped() {
+        window?.close()
     }
 
     @objc private func editFeaturePromptTapped(_ sender: NSButton) {
@@ -2596,34 +3416,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func requestPermissionsTapped() {
         let report = onRequestPermissions?() ?? "Permission request callback is not provided."
+        refreshPermissionStatus(showFooter: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.refreshPermissionStatus(showFooter: false)
+        }
         let stillMissing = report.contains("Not Allowed")
         if stillMissing {
-            setFooterStatus("Permission prompts requested. Grant access in System Settings, then test again.", kind: .neutral)
+            setFooterStatus("Permission prompts requested. Grant access in System Settings, then return to Jit APP.", kind: .neutral)
         } else {
             setFooterStatus("Permissions already granted.", kind: .success)
         }
     }
 
     @objc private func refreshPermissionStatusTapped() {
-        sectionPages[.permissions] = nil
-        if currentSection == .permissions {
-            showSection(.permissions, animated: false)
-        }
-
-        let report = onDiagnosePermissions?() ?? ""
-        if report.isEmpty {
-            setFooterStatus("Permission status refreshed.", kind: .neutral)
-            return
-        }
-
-        let allAllowed = report.contains("Accessibility: Allowed") &&
-            report.contains("Input Monitoring (ListenEvent): Allowed") &&
-            report.contains("Event Posting (PostEvent): Allowed")
-        if allAllowed {
-            setFooterStatus("Permission status refreshed: all required permissions are allowed.", kind: .success)
-        } else {
-            setFooterStatus("Permission status refreshed: some permissions are still missing.", kind: .error)
-        }
+        refreshPermissionStatus(showFooter: true)
     }
 
     @objc private func openPrivacySecuritySettingsTapped() {
@@ -2707,18 +3513,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var suppressReopenSettings = false
     private var isProcessing = false
     private var lastFeatureTriggeredAt: [String: Date] = [:]
+    private var launchedAt = Date.distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        launchedAt = Date()
         setupMainMenu()
         rebuildStatusBarMenu()
         registerHotkeys()
-        requestAccessibilityPermissionHint()
-        openSettings()
+        if shouldOpenSettingsOnLaunch() {
+            presentSettings(showPermissions: false)
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        settingsWindowController?.refreshPermissionStatus(showFooter: false)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if isQuitting { return false }
         if suppressReopenSettings { return false }
+        if Date().timeIntervalSince(launchedAt) < 1.5 && !shouldOpenSettingsOnLaunch() {
+            return false
+        }
         openSettings()
         return true
     }
@@ -2834,6 +3650,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func executeFeature(featureID: String) {
         guard let feature = config.features.first(where: { $0.id == featureID && $0.enabled }) else { return }
+        if shouldOpenSettingsOnLaunch() {
+            presentSettings(showPermissions: false)
+            return
+        }
         if isProcessing { return }
         isProcessing = true
         let sourceApp = NSWorkspace.shared.frontmostApplication
@@ -2842,116 +3662,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             guard let text else {
                 self.isProcessing = false
-                self.resultWindowController.showError(
-                    "No selected text detected.\n\n" +
-                    "Please select text in the target app, then press the hotkey.\n" +
-                    "If it still fails, verify:\n" +
-                    "1) System Settings -> Privacy & Security -> Accessibility allows Jit APP\n" +
-                    "2) System Settings -> Privacy & Security -> Input Monitoring allows Jit APP (if present)\n" +
-                    "3) The target app supports selected text read or Command+C copy\n",
-                    featureName: feature.displayName
-                )
+                self.presentSettings(showPermissions: false)
                 return
             }
 
-            let runProcess: (String?) -> Void = { instruction in
-                self.resultWindowController.showPending(selectedText: text, featureName: feature.displayName)
-                self.translationService.process(text: text, config: self.config, feature: feature, instruction: instruction) { result in
+            self.isProcessing = false
+            let modeIDs = ["custom", "refine", "translate"]
+            let modes = modeIDs.compactMap { id -> CommandInputWindowController.Mode? in
+                guard let f = self.config.features.first(where: { $0.id == id && $0.enabled }) else { return nil }
+                let promptPreview = f.promptTemplate
+                    .split(separator: "\n")
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first(where: { !$0.isEmpty }) ?? "\(f.displayName) prompt"
+                return .init(
+                    id: f.id,
+                    title: f.displayName,
+                    requiresInstruction: f.requiresInstruction,
+                    supportsReplace: f.supportsReplace,
+                    promptPreview: promptPreview
+                )
+            }
+            let input = CommandInputWindowController(
+                selectedText: text,
+                anchor: NSEvent.mouseLocation,
+                modes: modes,
+                defaultModeID: feature.id
+            )
+            input.onSubmit = { [weak self] modeID, instruction, onPartial, completion in
+                guard let self else { return nil }
+                guard let selectedFeature = self.config.features.first(where: { $0.id == modeID && $0.enabled }) else {
+                    completion(.failure(NSError(domain: "JitAPP", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected mode is unavailable."])))
+                    return nil
+                }
+                if self.isProcessing {
+                    completion(.failure(NSError(domain: "JitAPP", code: 429, userInfo: [NSLocalizedDescriptionKey: "Please wait for the previous task to finish."])))
+                    return nil
+                }
+                self.isProcessing = true
+                return self.translationService.processStreaming(
+                    text: text,
+                    config: self.config,
+                    feature: selectedFeature,
+                    instruction: selectedFeature.requiresInstruction ? instruction : nil,
+                    onPartial: onPartial
+                ) { result in
                     DispatchQueue.main.async {
                         self.isProcessing = false
-                        switch result {
-                        case .success(let output):
-                            self.resultWindowController.showResult(
-                                selectedText: text,
-                                output: output,
-                                featureName: feature.displayName,
-                                outputLabel: feature.id == "translate" ? "Translation" : "\(feature.displayName) Result",
-                                allowReplace: feature.supportsReplace,
-                                onReplace: { [weak self] in
-                                    self?.captureService.replaceSelectedText(with: output, targetApp: sourceApp)
-                                }
-                            )
-                        case .failure(let error):
-                            self.resultWindowController.showError(
-                                "\(feature.displayName) failed: \(error.localizedDescription)",
-                                selectedText: text,
-                                featureName: feature.displayName
-                            )
-                        }
+                        completion(result)
                     }
                 }
             }
-
-            if feature.requiresInstruction {
-                self.isProcessing = false
-                let modeIDs = ["custom", "refine", "translate"]
-                let modes = modeIDs.compactMap { id -> CommandInputWindowController.Mode? in
-                    guard let f = self.config.features.first(where: { $0.id == id && $0.enabled }) else { return nil }
-                    let promptPreview = f.promptTemplate
-                        .split(separator: "\n")
-                        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .first(where: { !$0.isEmpty }) ?? "\(f.displayName) prompt"
-                    return .init(id: f.id, title: f.displayName, requiresInstruction: f.requiresInstruction, promptPreview: promptPreview)
-                }
-                let input = CommandInputWindowController(
-                    selectedText: text,
-                    anchor: NSEvent.mouseLocation,
-                    modes: modes,
-                    defaultModeID: feature.id
-                )
-                input.onSubmit = { [weak self] modeID, instruction, completion in
-                    guard let self else { return }
-                    guard let selectedFeature = self.config.features.first(where: { $0.id == modeID && $0.enabled }) else {
-                        completion(.failure(NSError(domain: "JitAPP", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected mode is unavailable."])))
-                        return
-                    }
-                    if self.isProcessing {
-                        completion(.failure(NSError(domain: "JitAPP", code: 429, userInfo: [NSLocalizedDescriptionKey: "Please wait for the previous task to finish."])))
-                        return
-                    }
-                    self.isProcessing = true
-                    self.translationService.process(
-                        text: text,
-                        config: self.config,
-                        feature: selectedFeature,
-                        instruction: selectedFeature.requiresInstruction ? instruction : nil
-                    ) { result in
-                        DispatchQueue.main.async {
-                            self.isProcessing = false
-                            completion(result)
-                        }
-                    }
-                }
-                input.onReplace = { [weak self] output in
-                    self?.captureService.replaceSelectedText(with: output, targetApp: sourceApp)
-                }
-                input.onClose = { [weak self] in
-                    self?.commandInputWindowController = nil
-                }
-                suppressReopenSettings = true
-                NSApp.activate(ignoringOtherApps: true)
-                input.showWindow(nil)
-                input.window?.makeKeyAndOrderFront(nil)
-                DispatchQueue.main.async {
-                    input.focus()
-                }
-                input.beginAutoDismiss()
-                self.commandInputWindowController = input
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                    self?.suppressReopenSettings = false
-                }
-            } else {
-                runProcess(nil)
+            input.onReplace = { [weak self] output in
+                self?.captureService.replaceSelectedText(with: output, targetApp: sourceApp)
+            }
+            input.onClose = { [weak self] in
+                self?.commandInputWindowController = nil
+            }
+            suppressReopenSettings = true
+            NSApp.activate(ignoringOtherApps: true)
+            input.showWindow(nil)
+            input.window?.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.async {
+                input.focus()
+            }
+            input.beginAutoDismiss()
+            self.commandInputWindowController = input
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.suppressReopenSettings = false
             }
         }
     }
 
     @objc private func openSettings() {
+        presentSettings(showPermissions: false)
+    }
+
+    private func presentSettings(showPermissions: Bool) {
         if isQuitting { return }
         if let controller = settingsWindowController, let window = controller.window {
             window.center()
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            if showPermissions {
+                controller.showPermissionsSection()
+            }
             return
         }
 
@@ -2989,7 +3783,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.window?.center()
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        controller.focusPrimaryField()
+        if showPermissions {
+            controller.showPermissionsSection()
+        } else {
+            controller.showGetStartedSection()
+        }
         settingsWindowController = controller
     }
 
@@ -3013,8 +3811,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func requestAccessibilityPermissionHint() {
-        _ = AXIsProcessTrusted()
+    private var hasRequiredPermissions: Bool {
+        AXIsProcessTrusted() &&
+            CGPreflightListenEventAccess() &&
+            CGPreflightPostEventAccess()
+    }
+
+    private func shouldOpenSettingsOnLaunch() -> Bool {
+        !config.hasRequiredConnectionSettings || !hasRequiredPermissions
     }
 
     private func permissionReport() -> String {

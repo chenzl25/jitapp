@@ -1,12 +1,13 @@
 # Jit APP (macOS)
 
-A menu bar app for translating selected text globally on macOS, using an OpenAI-compatible Chat API (you can use a DeepSeek API key directly).
+A menu bar app for running AI actions on selected text globally on macOS, using an OpenAI-compatible Chat API (you can use a DeepSeek API key directly).
 
 ## Features
 
-- Global hotkey translation (default: `Option + D`)
-- Configurable hotkeys (modifier keys + a single letter/number)
-- Trigger translation by selecting text and pressing the hotkey
+- Global action palette hotkey (default: `Option + A`)
+- Translate, Refine, and Custom Prompt actions from one floating panel
+- Streaming AI output with in-panel Stop, Copy, and Replace controls
+- Copy returns only the generated output; Replace pastes the output back into the source app
 - Configurable options: `Base URL / API Key / Model / Target Language`
 - Launch-at-login toggle from the menu bar
 
@@ -47,9 +48,11 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build_app
 ## First-Time Setup
 
 1. Double-click `dist/Jit APP.app` to open it.
-2. In the menu bar app, open `Settings...` and fill in API settings.
-3. Select text in any app.
-4. Press the hotkey (default: `Option + D`) to translate.
+2. If Settings opens, use the `Get Started` checklist.
+3. Paste your API key, save/test the AI connection, and grant the requested system permissions.
+4. After setup is complete, Jit stays in the menu bar and no longer opens Settings on every launch.
+5. Select text in any app.
+6. Press the action palette hotkey (default: `Option + A`), choose an action, then run it.
 
 ## Permissions and System Settings
 
