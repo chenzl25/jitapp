@@ -5,7 +5,9 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 ## Features
 
 - Global action palette hotkey (default: `Option + A`)
-- Translate, Refine, and Custom Prompt actions from one floating panel
+- Translate, Refine, Vocabulary, and Custom Prompt actions from one floating panel
+- Vocabulary mode explains English word meaning, pronunciation, usage, examples, and common notes
+- Native macOS speech button in Vocabulary mode for fast selected-text pronunciation
 - Streaming AI output with in-panel Stop, Copy, and Replace controls
 - Copy returns only the generated output; Replace pastes the output back into the source app
 - Configurable options: `Base URL / API Key / Model / Target Language`

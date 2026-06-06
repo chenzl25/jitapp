@@ -4,8 +4,17 @@ import Foundation
 import ServiceManagement
 
 final class BubblePanel: NSPanel {
+    var keyDownHandler: ((NSEvent) -> Bool)?
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    override func keyDown(with event: NSEvent) {
+        if keyDownHandler?(event) == true {
+            return
+        }
+        super.keyDown(with: event)
+    }
 }
 
 final class DraggableVisualEffectView: NSVisualEffectView {
@@ -175,6 +184,23 @@ struct AppConfig {
     Return only the final processed text, no explanation.
     """
 
+    static let defaultVocabularyPromptTemplate = """
+    You are an English vocabulary coach. Help the user learn the selected English word, phrase, or sentence.
+
+    Output format (plain text):
+    1) Headword: the main English word or phrase to learn.
+    2) Pronunciation: give IPA if confident, plus a simple pronunciation hint.
+    3) Meaning: explain the meaning in Chinese, with the core English sense.
+    4) Usage: list 2-4 common collocations or sentence patterns.
+    5) Examples: give 2 short English example sentences, each followed by a Chinese translation.
+    6) Notes: mention common mistakes, register, or similar words only if useful.
+
+    Keep it concise, practical, and focused on learning the word.
+
+    Text:
+    {{text}}
+    """
+
     static let defaults = AppConfig(
         baseURL: "https://api.deepseek.com/v1",
         apiKey: "",
@@ -219,9 +245,64 @@ struct AppConfig {
                 enabled: true,
                 supportsReplace: true,
                 requiresInstruction: true
+            ),
+            FeatureConfig(
+                id: "vocabulary",
+                displayName: "Vocabulary",
+                hotkeyKey: "V",
+                hotkeyOption: true,
+                hotkeyCommand: false,
+                hotkeyControl: false,
+                hotkeyShift: false,
+                promptTemplate: AppConfig.defaultVocabularyPromptTemplate,
+                enabled: true,
+                supportsReplace: false,
+                requiresInstruction: false
             )
         ]
     )
+
+    static func defaultPromptTemplate(for featureID: String) -> String {
+        switch featureID {
+        case "translate":
+            return defaultTranslationPromptTemplate
+        case "refine":
+            return defaultRefinePromptTemplate
+        case "custom":
+            return defaultCustomPromptTemplate
+        case "vocabulary":
+            return defaultVocabularyPromptTemplate
+        default:
+            return defaultTranslationPromptTemplate
+        }
+    }
+
+    static func normalizedFeature(_ feature: FeatureConfig) -> FeatureConfig {
+        var item = feature
+        switch item.id {
+        case "translate": item.displayName = "Translate"
+        case "refine": item.displayName = "Refine"
+        case "custom": item.displayName = "Custom"
+        case "vocabulary": item.displayName = "Vocabulary"
+        default: break
+        }
+        if item.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            item.promptTemplate = defaultPromptTemplate(for: item.id)
+        }
+        return item
+    }
+
+    static func mergedFeatures(with savedFeatures: [FeatureConfig]) -> [FeatureConfig] {
+        var savedByID: [String: FeatureConfig] = [:]
+        for feature in savedFeatures {
+            savedByID[feature.id] = normalizedFeature(feature)
+        }
+        var result = defaults.features.map { defaultFeature -> FeatureConfig in
+            savedByID.removeValue(forKey: defaultFeature.id) ?? defaultFeature
+        }
+        result.append(contentsOf: savedByID.values)
+        return result
+    }
 
     static func load() -> AppConfig {
         let d = UserDefaults.standard
@@ -233,16 +314,7 @@ struct AppConfig {
         if let featuresData = d.data(forKey: "featureConfigs"),
            let decoded = try? JSONDecoder().decode([FeatureConfig].self, from: featuresData),
            !decoded.isEmpty {
-            config.features = decoded.map { feature in
-                var item = feature
-                switch item.id {
-                case "translate": item.displayName = "Translate"
-                case "refine": item.displayName = "Refine"
-                case "custom": item.displayName = "Custom"
-                default: break
-                }
-                return item
-            }
+            config.features = AppConfig.mergedFeatures(with: decoded)
         } else {
             // Backward compatibility: migrate old single-hotkey settings to translate feature.
             if let value = d.string(forKey: "hotkeyKey"),
@@ -292,7 +364,7 @@ struct AppConfig {
     }
 
     func resolvedPrompt(for feature: FeatureConfig, text: String, instruction: String? = nil) -> String {
-        let template = feature.promptTemplate.isEmpty ? AppConfig.defaultTranslationPromptTemplate : feature.promptTemplate
+        let template = feature.promptTemplate.isEmpty ? AppConfig.defaultPromptTemplate(for: feature.id) : feature.promptTemplate
         return template
             .replacingOccurrences(of: "{{targetLanguage}}", with: targetLanguage)
             .replacingOccurrences(of: "{{instruction}}", with: instruction ?? "")
@@ -910,7 +982,7 @@ final class TranslationService {
         let requestBody = ChatRequest(
             model: config.model,
             messages: [
-                .init(role: "system", content: "You are a professional translator."),
+                .init(role: "system", content: "You are a concise text assistant for translation, rewriting, and English vocabulary learning."),
                 .init(role: "user", content: prompt)
             ],
             temperature: 0.2,
@@ -926,6 +998,78 @@ final class TranslationService {
         return request
     }
 
+}
+
+@MainActor
+final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
+    private let synthesizer: NSSpeechSynthesizer
+    private var stateHandler: ((Bool) -> Void)?
+
+    override init() {
+        if let voice = Self.preferredEnglishVoice(), let synthesizer = NSSpeechSynthesizer(voice: voice) {
+            self.synthesizer = synthesizer
+        } else {
+            self.synthesizer = NSSpeechSynthesizer()
+        }
+        super.init()
+        synthesizer.delegate = self
+        synthesizer.rate = 175
+    }
+
+    func toggle(text: String, onStateChange: @escaping @MainActor (Bool) -> Void) -> Bool {
+        if synthesizer.isSpeaking {
+            stop()
+            return false
+        }
+
+        let normalized = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return false }
+
+        stateHandler = onStateChange
+        let started = synthesizer.startSpeaking(normalized)
+        onStateChange(started)
+        if !started {
+            stateHandler = nil
+        }
+        return started
+    }
+
+    func stop() {
+        guard synthesizer.isSpeaking else {
+            stateHandler?(false)
+            stateHandler = nil
+            return
+        }
+        synthesizer.stopSpeaking()
+        stateHandler?(false)
+        stateHandler = nil
+    }
+
+    func speechSynthesizer(_ sender: NSSpeechSynthesizer, didFinishSpeaking finishedSpeaking: Bool) {
+        stateHandler?(false)
+        stateHandler = nil
+    }
+
+    private static func preferredEnglishVoice() -> NSSpeechSynthesizer.VoiceName? {
+        let preferred = [
+            "com.apple.voice.compact.en-US.Samantha",
+            "com.apple.voice.enhanced.en-US.Samantha",
+            "com.apple.voice.compact.en-GB.Daniel",
+            "com.apple.voice.enhanced.en-GB.Daniel"
+        ]
+        let available = NSSpeechSynthesizer.availableVoices
+        for voiceID in preferred {
+            if let voice = available.first(where: { $0.rawValue == voiceID }) {
+                return voice
+            }
+        }
+        return available.first { voice in
+            let value = voice.rawValue.lowercased()
+            return value.contains(".en-") || value.contains("samantha") || value.contains("daniel")
+        }
+    }
 }
 
 @MainActor
@@ -1254,6 +1398,12 @@ final class PromptEditorWindowController: NSWindowController {
 
 @MainActor
 final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
+    private enum Layout {
+        static let compactSize = NSSize(width: 620, height: 218)
+        static let maxHeight: CGFloat = 720
+        static let outputHeightIncrease: CGFloat = 300
+    }
+
     private enum PanelPhase {
         case idle
         case running
@@ -1285,6 +1435,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
     private let outputTextView = NSTextView()
     private let outputScroll = NSScrollView()
     private let progressIndicator = NSProgressIndicator()
+    private let speakButton = NSButton(title: "", target: nil, action: nil)
     private let copyButton = NSButton(title: "Copy", target: nil, action: nil)
     private let replaceButton = NSButton(title: "Replace", target: nil, action: nil)
     private let runButton = NSButton(title: "Run", target: nil, action: nil)
@@ -1295,21 +1446,26 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
     private var expanded = false
     private let modes: [Mode]
     private var currentModeIndex: Int = 0
+    private let selectedText: String
     private let selectedPreview: String
     private var customInstructionDraft: String = ""
     private var activeRun: TextProcessingRun?
     private var isRunning = false
+    private var isSpeakingSelectedText = false
     private var outputDidStream = false
     private var runGeneration = 0
     var onSubmit: ((String, String?, @escaping @Sendable (String) -> Void, @escaping @Sendable (Result<String, Error>) -> Void) -> TextProcessingRun?)?
+    var onToggleSpeech: ((String, @escaping @MainActor (Bool) -> Void) -> Bool)?
+    var onStopSpeech: (() -> Void)?
     var onReplace: ((String) -> Void)?
     var onClose: (() -> Void)?
 
     init(selectedText: String, anchor: NSPoint, modes: [Mode], defaultModeID: String = "custom") {
         self.modes = modes.isEmpty ? [Mode(id: "custom", title: "Custom", requiresInstruction: true, supportsReplace: true, promptPreview: "Custom instruction mode")] : modes
+        self.selectedText = selectedText
         self.selectedPreview = selectedText.count > 80 ? String(selectedText.prefix(80)) + "..." : selectedText
         let panel = BubblePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 218),
+            contentRect: NSRect(origin: .zero, size: Layout.compactSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -1323,8 +1479,13 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         panel.isFloatingPanel = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
+        panel.minSize = Layout.compactSize
+        panel.maxSize = NSSize(width: Layout.compactSize.width, height: Layout.maxHeight)
         super.init(window: panel)
         panel.delegate = self
+        panel.keyDownHandler = { [weak self] event in
+            self?.handlePanelKeyDown(event) ?? false
+        }
         buildUI(selectedText: selectedText)
         if let idx = self.modes.firstIndex(where: { $0.id == defaultModeID }) {
             currentModeIndex = idx
@@ -1352,6 +1513,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         titleLabel.textColor = LantorVisual.ink
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         stylePhaseChip(.idle)
         phaseChip.translatesAutoresizingMaskIntoConstraints = false
@@ -1377,14 +1539,18 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         modeStack.layer?.borderColor = LantorVisual.borderSubtle.cgColor
         modeStack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
         modeStack.translatesAutoresizingMaskIntoConstraints = false
+        modeStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         modeButtons = modes.enumerated().map { index, mode in
-            let button = NSButton(title: mode.title, target: self, action: #selector(modeButtonTapped(_:)))
+            let button = NSButton(title: compactTitle(for: mode), target: self, action: #selector(modeButtonTapped(_:)))
             button.identifier = NSUserInterfaceItemIdentifier("\(index)")
             button.isBordered = false
             button.wantsLayer = true
             button.layer?.cornerRadius = 8
             button.layer?.masksToBounds = true
             button.translatesAutoresizingMaskIntoConstraints = false
+            button.lineBreakMode = .byTruncatingTail
+            button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            button.setContentHuggingPriority(.defaultLow, for: .horizontal)
             button.heightAnchor.constraint(equalToConstant: 28).isActive = true
             modeStack.addArrangedSubview(button)
             return button
@@ -1396,6 +1562,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         hintLabel.lineBreakMode = .byTruncatingTail
         hintLabel.maximumNumberOfLines = 1
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         commandField.placeholderString = "Type instruction..."
         commandField.translatesAutoresizingMaskIntoConstraints = false
@@ -1408,6 +1575,10 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         commandField.drawsBackground = false
         commandField.isBordered = false
         commandField.focusRingType = .default
+        commandField.usesSingleLineMode = true
+        commandField.lineBreakMode = .byTruncatingTail
+        commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         commandContainer.translatesAutoresizingMaskIntoConstraints = false
         commandContainer.wantsLayer = true
@@ -1416,6 +1587,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         commandContainer.layer?.backgroundColor = LantorVisual.input.cgColor
         commandContainer.layer?.borderWidth = 1
         commandContainer.layer?.borderColor = LantorVisual.border.cgColor
+        commandContainer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         commandContainer.addSubview(commandField)
 
         outputScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -1468,6 +1640,15 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         progressIndicator.widthAnchor.constraint(equalToConstant: 18).isActive = true
         progressIndicator.heightAnchor.constraint(equalToConstant: 18).isActive = true
 
+        speakButton.target = self
+        speakButton.action = #selector(speakTapped)
+        speakButton.translatesAutoresizingMaskIntoConstraints = false
+        speakButton.isHidden = true
+        speakButton.imagePosition = .imageOnly
+        speakButton.toolTip = "Speak selected text"
+        styleActionButton(speakButton, kind: .secondary, width: 38)
+        updateSpeakButton(speaking: false)
+
         copyButton.target = self
         copyButton.action = #selector(copyTapped)
         copyButton.translatesAutoresizingMaskIntoConstraints = false
@@ -1490,7 +1671,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         styleActionButton(cancelButton, kind: .secondary, width: 84)
 
-        let actionRow = NSStackView(views: [progressIndicator, copyButton, replaceButton, cancelButton, runButton])
+        let actionRow = NSStackView(views: [progressIndicator, speakButton, copyButton, replaceButton, cancelButton, runButton])
         actionRow.orientation = .horizontal
         actionRow.spacing = 8
         actionRow.alignment = .centerY
@@ -1539,6 +1720,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
             outputScroll.topAnchor.constraint(equalTo: commandContainer.bottomAnchor, constant: 10),
             outputScroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -10),
 
+            actionRow.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 14),
             actionRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
             actionRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
             actionRow.heightAnchor.constraint(equalToConstant: 32)
@@ -1639,7 +1821,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
             button.layer?.borderColor = LantorVisual.accentSoftBorder.cgColor
             button.alphaValue = button.isEnabled ? 1 : 0.52
             button.attributedTitle = NSAttributedString(
-                string: modes[index].title,
+                string: compactTitle(for: modes[index]),
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .medium),
                     .foregroundColor: selected ? LantorVisual.accent : LantorVisual.secondaryInk
@@ -1649,7 +1831,13 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func focus() {
-        window?.makeFirstResponder(commandField)
+        guard let window else { return }
+        window.makeKeyAndOrderFront(nil)
+        if modes[currentModeIndex].requiresInstruction {
+            window.makeFirstResponder(commandField)
+        } else {
+            window.makeFirstResponder(nil)
+        }
     }
 
     func beginAutoDismiss() {
@@ -1720,6 +1908,14 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         window?.close()
     }
 
+    @objc private func speakTapped() {
+        guard speechAvailable(for: modes[currentModeIndex]) else { return }
+        let started = onToggleSpeech?(selectedText) { [weak self] speaking in
+            self?.setSpeechState(speaking)
+        } ?? false
+        setSpeechState(started)
+    }
+
     @objc private func replaceTapped() {
         let output = outputTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !output.isEmpty else { return }
@@ -1742,6 +1938,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         activeRun?.cancel()
         activeRun = nil
         isRunning = false
+        onStopSpeech?()
         stopOutsideClickMonitor()
         if let localKeyMonitor {
             NSEvent.removeMonitor(localKeyMonitor)
@@ -1753,24 +1950,28 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
     private func installEscapeHandler() {
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
-            if event.keyCode == 53 { // ESC
-                self.cancelTapped()
-                return nil
-            }
-            if !self.isRunning && (event.keyCode == 36 || event.keyCode == 76) { // Return / Enter
-                self.runTapped()
-                return nil
-            }
-            if !self.isRunning && event.keyCode == 126 { // Up
-                self.moveMode(delta: -1)
-                return nil
-            }
-            if !self.isRunning && event.keyCode == 125 { // Down
-                self.moveMode(delta: 1)
-                return nil
-            }
-            return event
+            return self.handlePanelKeyDown(event) ? nil : event
         }
+    }
+
+    private func handlePanelKeyDown(_ event: NSEvent) -> Bool {
+        if event.keyCode == 53 { // ESC
+            cancelTapped()
+            return true
+        }
+        if !isRunning && (event.keyCode == 36 || event.keyCode == 76) { // Return / Enter
+            runTapped()
+            return true
+        }
+        if !isRunning && event.keyCode == 126 { // Up
+            moveMode(delta: -1)
+            return true
+        }
+        if !isRunning && event.keyCode == 125 { // Down
+            moveMode(delta: 1)
+            return true
+        }
+        return false
     }
 
     private func stopOutsideClickMonitor() {
@@ -1844,6 +2045,8 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         commandField.isEnabled = !running && mode.requiresInstruction
         commandField.isEditable = !running && mode.requiresInstruction
         outputTextView.isEditable = false
+        speakButton.isEnabled = speechAvailable(for: mode)
+        speakButton.isHidden = !speechAvailable(for: mode)
         copyButton.isEnabled = !running
         replaceButton.isEnabled = !running
         runButton.isEnabled = !running
@@ -1889,9 +2092,16 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
 
     private func refreshModeUI() {
         let mode = modes[currentModeIndex]
-        hintLabel.stringValue = "Selected: \(selectedPreview)"
-        hintLabel.maximumNumberOfLines = 2
+        if !speechAvailable(for: mode), isSpeakingSelectedText {
+            onStopSpeech?()
+            isSpeakingSelectedText = false
+            updateSpeakButton(speaking: false)
+        }
+        hintLabel.stringValue = "\(mode.title) · \(selectedPreview)"
+        hintLabel.maximumNumberOfLines = 1
         styleModeButtons()
+        speakButton.isHidden = !speechAvailable(for: mode)
+        speakButton.isEnabled = speechAvailable(for: mode)
         commandContainer.layer?.backgroundColor = (mode.requiresInstruction ? LantorVisual.input : LantorVisual.panel).cgColor
         if mode.requiresInstruction {
             commandField.isEditable = true
@@ -1901,14 +2111,66 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
                 attributes: [.foregroundColor: LantorVisual.mutedInk]
             )
             commandField.stringValue = customInstructionDraft
+            commandField.toolTip = nil
             styleActionButton(runButton, kind: .primary, title: "Run")
         } else {
             commandField.isEditable = false
             commandField.isEnabled = false
             commandField.placeholderAttributedString = NSAttributedString(string: "")
-            commandField.stringValue = "Uses saved prompt: \(mode.promptPreview)"
-            styleActionButton(runButton, kind: .primary, title: "Run \(mode.title)")
+            commandField.stringValue = actionHint(for: mode)
+            commandField.toolTip = mode.promptPreview
+            styleActionButton(runButton, kind: .primary, title: "Run")
         }
+    }
+
+    private func compactTitle(for mode: Mode) -> String {
+        switch mode.id {
+        case "custom":
+            return "Custom"
+        case "refine":
+            return "Polish"
+        case "translate":
+            return "Translate"
+        case "vocabulary":
+            return "Words"
+        default:
+            return mode.title
+        }
+    }
+
+    private func actionHint(for mode: Mode) -> String {
+        switch mode.id {
+        case "refine":
+            return "Polish the selected text"
+        case "translate":
+            return "Translate the selected text"
+        case "vocabulary":
+            return "Speak for pronunciation, Run for meaning and usage"
+        default:
+            return "Uses the saved prompt for \(mode.title)"
+        }
+    }
+
+    private func speechAvailable(for mode: Mode) -> Bool {
+        mode.id == "vocabulary"
+    }
+
+    private func setSpeechState(_ speaking: Bool) {
+        isSpeakingSelectedText = speaking
+        updateSpeakButton(speaking: speaking)
+        if speechAvailable(for: modes[currentModeIndex]) {
+            hintLabel.stringValue = speaking ? "Speaking · \(selectedPreview)" : "\(modes[currentModeIndex].title) · \(selectedPreview)"
+        }
+    }
+
+    private func updateSpeakButton(speaking: Bool) {
+        let symbolName = speaking ? "speaker.slash.fill" : "speaker.wave.2.fill"
+        speakButton.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: speaking ? "Stop speaking" : "Speak selected text")
+        speakButton.image?.isTemplate = true
+        speakButton.toolTip = speaking ? "Stop speaking" : "Speak selected text"
+        speakButton.contentTintColor = speaking ? LantorVisual.warningInk : LantorVisual.secondaryInk
+        styleActionButton(speakButton, kind: speaking ? .warning : .secondary)
+        speakButton.imagePosition = .imageOnly
     }
 
     private func setOutputText(_ text: String, emptyPlaceholder: String = "(No content returned)") {
@@ -1945,8 +2207,9 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         expanded = true
         outputScroll.isHidden = false
         var frame = window.frame
-        frame.origin.y -= 300
-        frame.size.height += 300
+        frame.origin.y -= Layout.outputHeightIncrease
+        frame.size.height += Layout.outputHeightIncrease
+        frame.size.width = Layout.compactSize.width
         window.setFrame(frame, display: true, animate: true)
     }
 
@@ -2018,7 +2281,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             case .getStarted: return "Setup checklist and next step"
             case .connection: return "Endpoint, API key, and model"
             case .entry: return "Global hotkey for the action palette"
-            case .prompts: return "Translate, refine, and custom prompts"
+            case .prompts: return "Translate, refine, vocabulary, and custom prompts"
             case .permissions: return "System access requirements"
             }
         }
@@ -2752,7 +3015,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         container.alignment = .leading
 
         let title = label("Action Palette Shortcut", font: Theme.sectionTitleFont, color: .labelColor)
-        let subtitle = label("Use one global shortcut to choose Translate, Refine, or Custom for the selected text.", font: Theme.captionFont, color: .secondaryLabelColor)
+        let subtitle = label("Use one global shortcut to choose Translate, Refine, Vocabulary, or Custom for the selected text.", font: Theme.captionFont, color: .secondaryLabelColor)
         subtitle.maximumNumberOfLines = 2
         let header = NSStackView(views: [title, subtitle])
         header.orientation = .vertical
@@ -2796,7 +3059,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         container.alignment = .leading
         container.addArrangedSubview(sectionHeader(
             title: "AI Actions",
-            subtitle: "Tune the three actions available in the floating palette."
+            subtitle: "Tune the four actions available in the floating palette."
         ))
 
         for feature in featureConfigs {
@@ -2972,6 +3235,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             return "Rewrite and polish prompt"
         case "custom":
             return "Instruction-driven custom mode"
+        case "vocabulary":
+            return "English word study prompt"
         default:
             return "Custom prompt template"
         }
@@ -3376,15 +3641,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func openPromptEditor(for feature: FeatureConfig) {
-        let defaultTemplate: String
-        switch feature.id {
-        case "translate":
-            defaultTemplate = AppConfig.defaultTranslationPromptTemplate
-        case "refine":
-            defaultTemplate = AppConfig.defaultRefinePromptTemplate
-        default:
-            defaultTemplate = AppConfig.defaultCustomPromptTemplate
-        }
+        let defaultTemplate = AppConfig.defaultPromptTemplate(for: feature.id)
         let editor = PromptEditorWindowController(currentTemplate: feature.promptTemplate, defaultTemplate: defaultTemplate)
         editor.onSave = { [weak self] newTemplate in
             guard let self else { return }
@@ -3503,6 +3760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var config = AppConfig.load()
     private let captureService = SelectionCaptureService()
     private let translationService = TranslationService()
+    private let speechService = SpeechService()
     private let loginItemManager = LoginItemManager()
     private let resultWindowController = ResultWindowController()
     private var settingsWindowController: SettingsWindowController?
@@ -3667,7 +3925,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             self.isProcessing = false
-            let modeIDs = ["custom", "refine", "translate"]
+            let modeIDs = ["custom", "refine", "translate", "vocabulary"]
             let modes = modeIDs.compactMap { id -> CommandInputWindowController.Mode? in
                 guard let f = self.config.features.first(where: { $0.id == id && $0.enabled }) else { return nil }
                 let promptPreview = f.promptTemplate
@@ -3715,14 +3973,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             input.onReplace = { [weak self] output in
                 self?.captureService.replaceSelectedText(with: output, targetApp: sourceApp)
             }
+            input.onToggleSpeech = { [weak self] selectedText, onStateChange in
+                self?.speechService.toggle(text: selectedText, onStateChange: onStateChange) ?? false
+            }
+            input.onStopSpeech = { [weak self] in
+                self?.speechService.stop()
+            }
             input.onClose = { [weak self] in
+                self?.speechService.stop()
                 self?.commandInputWindowController = nil
             }
             suppressReopenSettings = true
             NSApp.activate(ignoringOtherApps: true)
             input.showWindow(nil)
             input.window?.makeKeyAndOrderFront(nil)
-            DispatchQueue.main.async {
+            input.window?.orderFrontRegardless()
+            input.focus()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                NSApp.activate(ignoringOtherApps: true)
                 input.focus()
             }
             input.beginAutoDismiss()
