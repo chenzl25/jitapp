@@ -51,6 +51,8 @@ cat > "$PLIST_PATH" <<PLIST
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
+  <key>LSUIElement</key>
+  <true/>
 </dict>
 </plist>
 PLIST
