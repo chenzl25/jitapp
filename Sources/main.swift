@@ -1,6 +1,5 @@
 import AVFoundation
 import AppKit
-import AVFoundation
 import Carbon.HIToolbox
 import Foundation
 import NaturalLanguage
@@ -148,26 +147,8 @@ struct AppConfig {
     var targetLanguage: String
     var features: [FeatureConfig]
 
-    static let legacyTranslationPromptTemplateV1 = """
-    Translate the text into {{targetLanguage}} with fast response.
-
-    Output format (plain text):
-    1) Translation: give the full direct translation first.
-    2) Useful English words/phrases (English only): list 3-6 useful English words/phrases from the original text, each with:
-       - brief English meaning
-       - one common English collocation/usage
-       - one short English example sentence
-
-    Do NOT include phonetics/IPA, long grammar analysis, or long examples.
-    Keep it practical and concise.
-
-    Text:
-    {{text}}
-    """
-
     static let defaultTranslationPromptTemplate = """
     Translate the text into {{targetLanguage}} with fast response.
-    If the text is already written mainly in {{targetLanguage}}, translate it into English instead.
 
     Output format (plain text):
     1) Translation: give the full direct translation first.
@@ -311,10 +292,6 @@ struct AppConfig {
         if item.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             item.promptTemplate = defaultPromptTemplate(for: item.id)
         }
-        // Migrate untouched legacy defaults so prompt improvements reach existing users.
-        if item.id == "translate", item.promptTemplate == legacyTranslationPromptTemplateV1 {
-            item.promptTemplate = defaultTranslationPromptTemplate
-        }
         return item
     }
 
@@ -397,7 +374,11 @@ struct AppConfig {
     """
 
     func resolvedPrompt(for feature: FeatureConfig, text: String, instruction: String? = nil) -> String {
-        let template = feature.promptTemplate.isEmpty ? AppConfig.defaultPromptTemplate(for: feature.id) : feature.promptTemplate
+        var template = feature.promptTemplate.isEmpty ? AppConfig.defaultPromptTemplate(for: feature.id) : feature.promptTemplate
+        // With no selection, an instruction-only feature acts as a general prompt box.
+        if feature.requiresInstruction, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            template = AppConfig.generalInstructionPromptTemplate
+        }
         return template
             .replacingOccurrences(of: "{{targetLanguage}}", with: effectiveTargetLanguage(for: text))
             .replacingOccurrences(of: "{{instruction}}", with: instruction ?? "")
@@ -1041,29 +1022,6 @@ final class TranslationService {
             code: status,
             userInfo: [NSLocalizedDescriptionKey: detail.isEmpty ? message : "\(message)\n\(detail)"]
         )
-    }
-
-    /// Whether this error is most likely fixed by changing Settings (key / URL / model).
-    static func isConfigurationError(_ error: Error) -> Bool {
-        let ns = error as NSError
-        if ns.domain == "Translator" { return [400, 401, 403, 404].contains(ns.code) }
-        if ns.domain == NSURLErrorDomain {
-            return [NSURLErrorBadURL, NSURLErrorUnsupportedURL, NSURLErrorCannotFindHost].contains(ns.code)
-        }
-        return false
-    }
-
-    static func userFacingMessage(for error: Error) -> String {
-        let ns = error as NSError
-        if ns.domain == NSURLErrorDomain {
-            switch ns.code {
-            case NSURLErrorTimedOut: return "The request timed out (30s). Check your network or the API service."
-            case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost: return "No network connection."
-            case NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost: return "Cannot reach the API host. Check the Base URL in Settings."
-            default: break
-            }
-        }
-        return error.localizedDescription
     }
 
 }
