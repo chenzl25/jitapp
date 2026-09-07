@@ -10,6 +10,11 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 - Native macOS speech button in Vocabulary mode for fast selected-text pronunciation
 - Streaming AI output with in-panel Stop, Copy, and Replace controls
 - Copy returns only the generated output; Replace pastes the output back into the source app
+- Palette keyboard: `↑/↓` or `⌘1–4` switch actions, `↩` runs, `⌘C` copies the result, `⌘↩` replaces, `⎋` stops/closes
+- Translate detects the source language and flips direction automatically (e.g. Chinese → English)
+- The palette opens instantly at the selection, works without a selection (Custom), and is resizable once output appears
+- Recent Results in the menu bar reopen previous outputs; "Last Result" is one click away when nothing is selected
+- Speech uses the best installed English voice (premium/enhanced when available) with a shortcut to download better voices
 - Configurable options: `Base URL / API Key / Model / Target Language`
 - Launch-at-login toggle from the menu bar
 
