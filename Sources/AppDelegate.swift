@@ -40,10 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Only reachable while Settings is open (the app has no Dock icon otherwise).
-        if let controller = settingsWindowController {
-            controller.window?.makeKeyAndOrderFront(nil)
-        }
+        // The user launched Jit again from Finder/Spotlight or clicked its Dock icon while Settings is open.
+        // As a menu-bar app this is the only way "opening" it can show anything, so show Settings.
+        presentSettings()
         return false
     }
 
