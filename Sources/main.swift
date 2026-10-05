@@ -4,6 +4,7 @@ import Carbon.HIToolbox
 import Foundation
 import NaturalLanguage
 import ServiceManagement
+import JitCodex
 
 final class BubblePanel: NSPanel {
     var keyDownHandler: ((NSEvent) -> Bool)?
@@ -141,6 +142,9 @@ struct FeatureConfig: Codable {
 }
 
 struct AppConfig {
+    var backend: AIBackend
+    var codexPath: String
+    var codexModel: String
     var baseURL: String
     var apiKey: String
     var model: String
@@ -205,6 +209,9 @@ struct AppConfig {
     """
 
     static let defaults = AppConfig(
+        backend: .codexCLI,
+        codexPath: "",
+        codexModel: "",
         baseURL: "https://api.deepseek.com/v1",
         apiKey: "",
         model: "deepseek-chat",
@@ -312,6 +319,9 @@ struct AppConfig {
         var config = AppConfig.defaults
         if let value = d.string(forKey: "baseURL")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.baseURL = value }
         if let value = d.string(forKey: "apiKey") { config.apiKey = value }
+        config.backend = AIBackend.load(savedValue: d.string(forKey: "aiBackend"), apiKey: config.apiKey)
+        config.codexPath = d.string(forKey: "codexPath") ?? ""
+        config.codexModel = d.string(forKey: "codexModel") ?? ""
         if let value = d.string(forKey: "model")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.model = value }
         if let value = d.string(forKey: "targetLanguage")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.targetLanguage = value }
         if let featuresData = d.data(forKey: "featureConfigs"),
@@ -350,13 +360,27 @@ struct AppConfig {
     }
 
     var hasRequiredConnectionSettings: Bool {
-        !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        if backend == .codexCLI { return CodexCLI.executable(path: codexPath) != nil }
+        return !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var connectionSetupMessage: String {
+        backend == .codexCLI
+            ? "Install Codex CLI and run codex login in Terminal, or choose an API connection."
+            : "Add an API endpoint, key, and model to start running actions."
+    }
+
+    var connectionModelName: String {
+        backend == .codexCLI ? (codexModel.isEmpty ? "Codex default" : codexModel) : model
+    }
+
     func save() {
         let d = UserDefaults.standard
+        d.set(backend.rawValue, forKey: "aiBackend")
+        d.set(codexPath, forKey: "codexPath")
+        d.set(codexModel, forKey: "codexModel")
         d.set(baseURL, forKey: "baseURL")
         d.set(apiKey, forKey: "apiKey")
         d.set(model, forKey: "model")
@@ -897,6 +921,10 @@ final class TranslationService {
         instruction: String? = nil,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) {
+        if config.backend == .codexCLI {
+            _ = CodexCLI.run(prompt: config.resolvedPrompt(for: feature, text: text, instruction: instruction), model: config.codexModel, path: config.codexPath, completion: completion)
+            return
+        }
         do {
             let request = try makeRequest(text: text, config: config, feature: feature, instruction: instruction, stream: nil)
             URLSession.shared.dataTask(with: request) { data, response, error in
@@ -945,6 +973,10 @@ final class TranslationService {
         onPartial: @escaping @Sendable (String) -> Void,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) -> TextProcessingRun {
+        if config.backend == .codexCLI {
+            let run = CodexCLI.run(prompt: config.resolvedPrompt(for: feature, text: text, instruction: instruction), model: config.codexModel, path: config.codexPath, onPartial: onPartial, completion: completion)
+            return TextProcessingRun(cancelHandler: { run.cancel() }, retaining: [run])
+        }
         do {
             let request = try makeRequest(text: text, config: config, feature: feature, instruction: instruction, stream: true)
             let delegate = StreamingChatDelegate(onPartial: onPartial, completion: completion)
@@ -1375,6 +1407,9 @@ enum FriendlyError {
     /// Maps transport and API errors to a short actionable message.
     /// `needsSettings` is true when the fix most likely lives in Settings.
     static func describe(_ error: Error) -> (message: String, needsSettings: Bool) {
+        if let codexError = error as? CodexCLIError {
+            return (codexError.localizedDescription, codexError.needsSettings)
+        }
         if let urlError = error as? URLError {
             switch urlError.code {
             case .notConnectedToInternet, .networkConnectionLost:
@@ -2351,9 +2386,9 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         activeRun = nil
         switch result {
         case .success(let output):
-            if !outputDidStream {
-                rawOutput = output
-            }
+            // The completed response is authoritative if a CLI event revised
+            // an earlier snapshot or emitted more than one agent message.
+            rawOutput = output
             phase = .done
             setOutputText(rawOutput)
             render()

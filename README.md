@@ -1,6 +1,6 @@
 # Jit APP (macOS)
 
-A menu bar app for running AI actions on selected text globally on macOS, using an OpenAI-compatible Chat API (you can use a DeepSeek API key directly).
+A menu bar app for running AI actions on selected text globally on macOS, using your local Codex CLI login or an OpenAI-compatible Chat API.
 
 ## Features
 
@@ -15,7 +15,8 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 - The palette opens instantly at the selection, works without a selection (Custom), and is resizable once output appears
 - Recent Results in the menu bar reopen previous outputs; "Last Result" is one click away when nothing is selected
 - Speech uses the best installed English voice (premium/enhanced when available) with a shortcut to download better voices
-- Configurable options: `Base URL / API Key / Model / Target Language`
+- Local Codex CLI mode reuses your saved login; no API key is required in Jit
+- Choose a local Codex model or an API `Base URL / API Key / Model`; settings are saved separately
 - Launch-at-login toggle from the menu bar
 
 ## Run Locally
@@ -55,11 +56,30 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build_app
 ## First-Time Setup
 
 1. Double-click `dist/Jit APP.app` to open it.
-2. If Settings opens, use the `Get Started` checklist.
-3. Paste your API key, save/test the AI connection, and grant the requested system permissions.
+2. Open Settings → AI Model. New users default to **Local Codex CLI**. Existing API configurations stay on **OpenAI-compatible API**.
+3. For Codex, install the CLI and sign in once in Terminal:
+
+   ```bash
+   npm install -g @openai/codex
+   codex login
+   ```
+
+   Jit automatically detects common installations, including Homebrew. Use **Codex path** for another install location. Leave **Model** blank for Codex's default, or enter a model supported by your Codex account. Click **Test Connection** to verify a real request.
+
+   For API mode, enter your Base URL, API Key and Model. Grant the requested macOS permissions in either mode.
 4. After setup is complete, Jit stays in the menu bar and no longer opens Settings on every launch.
 5. Select text in any app.
 6. Press the action palette hotkey (default: `Option + A`), choose an action, then run it.
+
+Codex uses saved CLI authentication without reading or copying tokens into Jit. Each request runs in a temporary directory using read-only, ephemeral non-interactive mode with user-configured tools disabled. Stop cancels the child process. CLI events can arrive as complete messages rather than individual tokens; the final response replaces earlier output. Codex needs internet access and available account usage. This integration is tested with Codex CLI 0.159.3; update an older CLI if Jit reports unsupported options. See the [official non-interactive documentation](https://developers.openai.com/codex/noninteractive).
+
+## Verification
+
+```bash
+swift test
+swift build
+./scripts/release.sh
+```
 
 ## Permissions and System Settings
 

@@ -12,6 +12,11 @@ let package = Package(
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .executableTarget(
-            name: "fanyiapp"),
+            name: "fanyiapp",
+            dependencies: ["JitCodex"],
+            path: "Sources",
+            exclude: ["JitCodex"]),
+        .target(name: "JitCodex", path: "Sources/JitCodex"),
+        .testTarget(name: "JitCodexTests", dependencies: ["JitCodex"]),
     ]
 )

@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let entry = config.features.first(where: { $0.id == "custom" })
         return SetupStatus(
             connectionConfigured: config.hasRequiredConnectionSettings,
+            connectionProblem: config.connectionSetupMessage,
             accessibility: AXIsProcessTrusted(),
             inputMonitoring: CGPreflightListenEventAccess(),
             postEvents: CGPreflightPostEventAccess(),

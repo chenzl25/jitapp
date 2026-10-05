@@ -1,10 +1,12 @@
 import AppKit
 import Carbon.HIToolbox
+import JitCodex
 
 // MARK: - Setup status (single source of truth for banners, badges, menu bar, palette)
 
 struct SetupStatus {
     var connectionConfigured: Bool
+    var connectionProblem: String = "Set up an AI connection to start running actions."
     var accessibility: Bool
     var inputMonitoring: Bool
     var postEvents: Bool
@@ -21,7 +23,7 @@ struct SetupStatus {
             return "Grant system permissions so Jit can read and replace selected text."
         }
         if !connectionConfigured {
-            return "Add an API endpoint, key, and model to start running actions."
+            return connectionProblem
         }
         if !hotkeyRegistered {
             return hotkeyProblem ?? "The global shortcut \(shortcutText) is not registered."
@@ -35,7 +37,7 @@ struct SetupStatus {
             return "Missing system permissions — reading and replacing text may fail."
         }
         if !connectionConfigured {
-            return "No API key configured yet."
+            return connectionProblem
         }
         return nil
     }
@@ -109,7 +111,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         var subtitle: String {
             switch self {
             case .general: return "Shortcut, startup, translation, and voice"
-            case .model: return "Endpoint, API key, and model"
+            case .model: return "Local Codex or an API connection"
             case .actions: return "Prompts behind Translate, Refine, Vocabulary, and Custom"
             case .permissions: return "System access Jit needs to read and replace text"
             }
@@ -191,6 +193,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let baseURLField = NSTextField(string: "")
     private let apiKeyField = NSSecureTextField(string: "")
     private let modelField = NSTextField(string: "")
+    private let codexPathField = NSTextField(string: "")
+    private let codexModelField = NSTextField(string: "")
+    private let backendPicker = NSPopUpButton()
+    private var backend: AIBackend
     private let targetLanguageField = NSTextField(string: "")
     private var featureConfigs: [FeatureConfig]
     private var shortcut: ShortcutDraft
@@ -217,6 +223,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private weak var testButton: NSButton?
     private weak var testSpinner: NSProgressIndicator?
     private weak var testResultLabel: NSTextField?
+    private weak var codexLocationLabel: NSTextField?
+    private var connectionTestGeneration = 0
     private weak var loginItemCheckbox: NSButton?
     private weak var loginItemStatusLabel: NSTextField?
     private weak var permissionsFeedbackLabel: NSTextField?
@@ -230,6 +238,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     // MARK: Init
 
     init(config: AppConfig) {
+        backend = config.backend
         featureConfigs = config.features
         let entry = config.features.first(where: { $0.id == "custom" }) ?? AppConfig.defaults.features[0]
         shortcut = ShortcutDraft(feature: entry)
@@ -255,6 +264,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         baseURLField.stringValue = config.baseURL
         apiKeyField.stringValue = config.apiKey
         modelField.stringValue = config.model
+        codexPathField.stringValue = config.codexPath
+        codexModelField.stringValue = config.codexModel
         targetLanguageField.stringValue = config.targetLanguage
 
         configureInputFields()
@@ -292,7 +303,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     func focusPrimaryField() {
         showSection(.model, animated: false)
-        window?.makeFirstResponder(apiKeyField)
+        window?.makeFirstResponder(backend == .codexCLI ? codexModelField : apiKeyField)
     }
 
     /// Re-reads permissions/hotkey state and updates every status surface in the window.
@@ -318,6 +329,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             }
         }
         return AppConfig(
+            backend: backend,
+            codexPath: codexPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            codexModel: codexModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             baseURL: baseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             model: modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -336,7 +350,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
+        if let field = obj.object as? NSTextField,
+           [baseURLField, apiKeyField, modelField, codexPathField, codexModelField].contains(where: { $0 === field }) {
+            invalidateConnectionTest()
+            updateCodexLocation()
+        }
         commit()
+    }
+
+    private func invalidateConnectionTest() {
+        connectionTestGeneration += 1
+        testButton?.isEnabled = true
+        testSpinner?.stopAnimation(nil)
+        testResultLabel?.stringValue = ""
+    }
+
+    private func updateCodexLocation() {
+        let found = CodexCLI.executable(path: codexPathField.stringValue)
+        codexLocationLabel?.stringValue = found.map { "Found: " + $0.path } ?? "Install Codex CLI, then run codex login in Terminal."
+        codexLocationLabel?.textColor = found == nil ? Theme.warnColor : .secondaryLabelColor
     }
 
     // MARK: Escape closes the window (unless a text field or the recorder owns the key)
@@ -360,7 +392,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     // MARK: UI construction
 
     private func configureInputFields() {
-        [baseURLField, apiKeyField, modelField, targetLanguageField].forEach { field in
+        [baseURLField, apiKeyField, modelField, codexPathField, codexModelField, targetLanguageField].forEach { field in
             field.font = NSFont.systemFont(ofSize: 14)
             field.focusRingType = .default
             field.drawsBackground = false
@@ -373,6 +405,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         baseURLField.placeholderString = "https://api.openai.com/v1"
         apiKeyField.placeholderString = "sk-…"
         modelField.placeholderString = "gpt-4o-mini"
+        codexPathField.placeholderString = "Automatic detection"
+        codexModelField.placeholderString = "Default Codex model"
         targetLanguageField.placeholderString = "Chinese"
     }
 
@@ -640,7 +674,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     @objc private func bannerActionTapped() {
         showSection(bannerTarget, animated: true)
         if bannerTarget == .model {
-            window?.makeFirstResponder(apiKeyField)
+            window?.makeFirstResponder(backend == .codexCLI ? codexModelField : apiKeyField)
         }
     }
 
@@ -969,11 +1003,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.alignment = .leading
         stack.addArrangedSubview(sectionHeader(
             title: "Connection",
-            subtitle: "Any OpenAI-compatible chat completions endpoint. Changes are saved as you go."
+            subtitle: "Use your local Codex login or an API connection. Changes are saved as you go."
         ))
-        stack.addArrangedSubview(formRow("Base URL", control: fieldContainer(for: baseURLField, minWidth: 460)))
-        stack.addArrangedSubview(apiKeyRow())
-        stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: modelField, minWidth: 300)))
+        backendPicker.removeAllItems()
+        backendPicker.addItems(withTitles: ["Local Codex CLI", "OpenAI-compatible API"])
+        backendPicker.selectItem(at: backend == .codexCLI ? 0 : 1)
+        backendPicker.target = self
+        backendPicker.action = #selector(backendChanged)
+        stack.addArrangedSubview(formRow("Use", control: backendPicker))
+        if backend == .codexCLI {
+            stack.addArrangedSubview(formRow("", control: label(
+                "Uses your saved Codex login. No API key is needed in Jit.",
+                font: Theme.captionFont, color: .secondaryLabelColor
+            )))
+            stack.addArrangedSubview(formRow("Codex path", control: fieldContainer(for: codexPathField, minWidth: 420)))
+            let location = label("", font: Theme.captionFont, color: .secondaryLabelColor)
+            codexLocationLabel = location
+            updateCodexLocation()
+            stack.addArrangedSubview(formRow("", control: location))
+            stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: codexModelField, minWidth: 300)))
+            stack.addArrangedSubview(formRow("", control: label(
+                "Optional. Leave blank to use Codex's default model.",
+                font: Theme.captionFont, color: .secondaryLabelColor
+            )))
+        } else {
+            stack.addArrangedSubview(formRow("Base URL", control: fieldContainer(for: baseURLField, minWidth: 460)))
+            stack.addArrangedSubview(apiKeyRow())
+            stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: modelField, minWidth: 300)))
+        }
 
         let button = NSButton(title: "Test Connection", target: self, action: #selector(testTapped))
         styleSecondaryButton(button)
@@ -1002,6 +1059,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return stack
     }
 
+    @objc private func backendChanged() {
+        window?.makeFirstResponder(nil)
+        invalidateConnectionTest()
+        backend = backendPicker.indexOfSelectedItem == 0 ? .codexCLI : .chatAPI
+        commit(toast: "AI connection changed.")
+        sectionPages[.model] = nil
+        showSection(.model, animated: false)
+    }
+
     private func apiKeyRow() -> NSView {
         let pasteButton = NSButton(title: "Paste", target: self, action: #selector(pasteAPIKey))
         styleInlineButton(pasteButton)
@@ -1020,6 +1086,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             return
         }
         apiKeyField.stringValue = text
+        invalidateConnectionTest()
         commit(toast: "API key pasted and saved.")
     }
 
@@ -1027,23 +1094,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         window?.makeFirstResponder(nil)
         let config = draftConfig()
         guard config.hasRequiredConnectionSettings else {
-            setTestResult("Fill in Base URL, API Key, and Model first.", kind: .error)
+            setTestResult(config.connectionSetupMessage, kind: .error)
             return
         }
         guard let feature = config.features.first(where: { $0.id == "translate" }) else { return }
         commit()
+        connectionTestGeneration += 1
+        let generation = connectionTestGeneration
         testButton?.isEnabled = false
         testSpinner?.startAnimation(nil)
         setTestResult("Sending a test request…", kind: .neutral)
         let started = Date()
         onTest?(config, feature) { [weak self] result in
-            guard let self else { return }
+            guard let self, self.connectionTestGeneration == generation else { return }
             self.testButton?.isEnabled = true
             self.testSpinner?.stopAnimation(nil)
             let elapsed = String(format: "%.1fs", Date().timeIntervalSince(started))
             switch result {
             case .success:
-                self.setTestResult("Connected · \(config.model) · \(elapsed)", kind: .success)
+                self.setTestResult("Connected · \(config.connectionModelName) · \(elapsed)", kind: .success)
             case .failure(let error):
                 self.setTestResult("Failed: \(FriendlyError.describe(error).message)", kind: .error)
             }
