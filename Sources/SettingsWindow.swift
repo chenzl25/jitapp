@@ -1,6 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
-import JitCodex
+import JitCLI
 
 // MARK: - Setup status (single source of truth for banners, badges, menu bar, palette)
 
@@ -111,7 +111,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         var subtitle: String {
             switch self {
             case .general: return "Shortcut, startup, translation, and voice"
-            case .model: return "Local Codex or an API connection"
+            case .model: return "Local Codex, Claude Code, or an API connection"
             case .actions: return "Prompts behind Translate, Refine, Vocabulary, and Custom"
             case .permissions: return "System access Jit needs to read and replace text"
             }
@@ -195,6 +195,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let modelField = NSTextField(string: "")
     private let codexPathField = NSTextField(string: "")
     private let codexModelField = NSTextField(string: "")
+    private let claudePathField = NSTextField(string: "")
+    private let claudeModelField = NSTextField(string: "")
     private let backendPicker = NSPopUpButton()
     private var backend: AIBackend
     private let targetLanguageField = NSTextField(string: "")
@@ -223,7 +225,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private weak var testButton: NSButton?
     private weak var testSpinner: NSProgressIndicator?
     private weak var testResultLabel: NSTextField?
-    private weak var codexLocationLabel: NSTextField?
+    private weak var cliLocationLabel: NSTextField?
     private var connectionTestGeneration = 0
     private weak var loginItemCheckbox: NSButton?
     private weak var loginItemStatusLabel: NSTextField?
@@ -266,6 +268,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         modelField.stringValue = config.model
         codexPathField.stringValue = config.codexPath
         codexModelField.stringValue = config.codexModel
+        claudePathField.stringValue = config.claudePath
+        claudeModelField.stringValue = config.claudeModel
         targetLanguageField.stringValue = config.targetLanguage
 
         configureInputFields()
@@ -303,7 +307,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     func focusPrimaryField() {
         showSection(.model, animated: false)
-        window?.makeFirstResponder(backend == .codexCLI ? codexModelField : apiKeyField)
+        window?.makeFirstResponder(primaryConnectionField)
     }
 
     /// Re-reads permissions/hotkey state and updates every status surface in the window.
@@ -332,6 +336,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             backend: backend,
             codexPath: codexPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             codexModel: codexModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            claudePath: claudePathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            claudeModel: claudeModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             baseURL: baseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             model: modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -351,9 +357,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     func controlTextDidEndEditing(_ obj: Notification) {
         if let field = obj.object as? NSTextField,
-           [baseURLField, apiKeyField, modelField, codexPathField, codexModelField].contains(where: { $0 === field }) {
+           [baseURLField, apiKeyField, modelField, codexPathField, codexModelField, claudePathField, claudeModelField].contains(where: { $0 === field }) {
             invalidateConnectionTest()
-            updateCodexLocation()
+            updateCLILocation()
         }
         commit()
     }
@@ -365,10 +371,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         testResultLabel?.stringValue = ""
     }
 
-    private func updateCodexLocation() {
-        let found = CodexCLI.executable(path: codexPathField.stringValue)
-        codexLocationLabel?.stringValue = found.map { "Found: " + $0.path } ?? "Install Codex CLI, then run codex login in Terminal."
-        codexLocationLabel?.textColor = found == nil ? Theme.warnColor : .secondaryLabelColor
+    /// Path and model fields for the selected local CLI.
+    private var cliFields: (tool: LocalCLITool, path: NSTextField, model: NSTextField)? {
+        switch backend {
+        case .codexCLI: return (.codex, codexPathField, codexModelField)
+        case .claudeCLI: return (.claude, claudePathField, claudeModelField)
+        case .chatAPI: return nil
+        }
+    }
+
+    private var primaryConnectionField: NSTextField { cliFields?.model ?? apiKeyField }
+
+    private func updateCLILocation() {
+        guard let cli = cliFields else { return }
+        let found = LocalCLI.executable(for: cli.tool, path: cli.path.stringValue)
+        cliLocationLabel?.stringValue = found.map { "Found: " + $0.path } ?? "Install \(cli.tool.displayName), then run \(cli.tool.loginCommand) in Terminal."
+        cliLocationLabel?.textColor = found == nil ? Theme.warnColor : .secondaryLabelColor
     }
 
     // MARK: Escape closes the window (unless a text field or the recorder owns the key)
@@ -392,7 +410,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     // MARK: UI construction
 
     private func configureInputFields() {
-        [baseURLField, apiKeyField, modelField, codexPathField, codexModelField, targetLanguageField].forEach { field in
+        [baseURLField, apiKeyField, modelField, codexPathField, codexModelField, claudePathField, claudeModelField, targetLanguageField].forEach { field in
             field.font = NSFont.systemFont(ofSize: 14)
             field.focusRingType = .default
             field.drawsBackground = false
@@ -407,6 +425,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         modelField.placeholderString = "gpt-4o-mini"
         codexPathField.placeholderString = "Automatic detection"
         codexModelField.placeholderString = "Default Codex model"
+        claudePathField.placeholderString = "Automatic detection"
+        claudeModelField.placeholderString = "Default Claude model, or sonnet / haiku / opus"
         targetLanguageField.placeholderString = "Chinese"
     }
 
@@ -674,7 +694,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     @objc private func bannerActionTapped() {
         showSection(bannerTarget, animated: true)
         if bannerTarget == .model {
-            window?.makeFirstResponder(backend == .codexCLI ? codexModelField : apiKeyField)
+            window?.makeFirstResponder(primaryConnectionField)
         }
     }
 
@@ -1003,27 +1023,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.alignment = .leading
         stack.addArrangedSubview(sectionHeader(
             title: "Connection",
-            subtitle: "Use your local Codex login or an API connection. Changes are saved as you go."
+            subtitle: "Use your local Codex or Claude Code login, or an API connection. Changes are saved as you go."
         ))
         backendPicker.removeAllItems()
-        backendPicker.addItems(withTitles: ["Local Codex CLI", "OpenAI-compatible API"])
-        backendPicker.selectItem(at: backend == .codexCLI ? 0 : 1)
+        backendPicker.addItems(withTitles: Self.backendChoices.map(\.title))
+        backendPicker.selectItem(at: Self.backendChoices.firstIndex(where: { $0.backend == backend }) ?? 0)
         backendPicker.target = self
         backendPicker.action = #selector(backendChanged)
         stack.addArrangedSubview(formRow("Use", control: backendPicker))
-        if backend == .codexCLI {
+        if let cli = cliFields {
+            let name = cli.tool.displayName
             stack.addArrangedSubview(formRow("", control: label(
-                "Uses your saved Codex login. No API key is needed in Jit.",
+                "Uses your saved \(name) login. No API key is needed in Jit.",
                 font: Theme.captionFont, color: .secondaryLabelColor
             )))
-            stack.addArrangedSubview(formRow("Codex path", control: fieldContainer(for: codexPathField, minWidth: 420)))
+            stack.addArrangedSubview(formRow("\(cli.tool.executableName.capitalized) path", control: fieldContainer(for: cli.path, minWidth: 420)))
             let location = label("", font: Theme.captionFont, color: .secondaryLabelColor)
-            codexLocationLabel = location
-            updateCodexLocation()
+            cliLocationLabel = location
+            updateCLILocation()
             stack.addArrangedSubview(formRow("", control: location))
-            stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: codexModelField, minWidth: 300)))
+            stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: cli.model, minWidth: 300)))
             stack.addArrangedSubview(formRow("", control: label(
-                "Optional. Leave blank to use Codex's default model.",
+                "Optional. Leave blank to use \(name)'s default model.",
                 font: Theme.captionFont, color: .secondaryLabelColor
             )))
         } else {
@@ -1059,10 +1080,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return stack
     }
 
+    private static let backendChoices: [(backend: AIBackend, title: String)] = [
+        (.codexCLI, "Local Codex CLI"),
+        (.claudeCLI, "Local Claude Code CLI"),
+        (.chatAPI, "OpenAI-compatible API"),
+    ]
+
     @objc private func backendChanged() {
         window?.makeFirstResponder(nil)
         invalidateConnectionTest()
-        backend = backendPicker.indexOfSelectedItem == 0 ? .codexCLI : .chatAPI
+        let index = backendPicker.indexOfSelectedItem
+        backend = Self.backendChoices.indices.contains(index) ? Self.backendChoices[index].backend : .chatAPI
         commit(toast: "AI connection changed.")
         sectionPages[.model] = nil
         showSection(.model, animated: false)

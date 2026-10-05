@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 import Foundation
 import NaturalLanguage
 import ServiceManagement
-import JitCodex
+import JitCLI
 
 final class BubblePanel: NSPanel {
     var keyDownHandler: ((NSEvent) -> Bool)?
@@ -145,6 +145,8 @@ struct AppConfig {
     var backend: AIBackend
     var codexPath: String
     var codexModel: String
+    var claudePath: String
+    var claudeModel: String
     var baseURL: String
     var apiKey: String
     var model: String
@@ -212,6 +214,8 @@ struct AppConfig {
         backend: .codexCLI,
         codexPath: "",
         codexModel: "",
+        claudePath: "",
+        claudeModel: "",
         baseURL: "https://api.deepseek.com/v1",
         apiKey: "",
         model: "deepseek-chat",
@@ -320,8 +324,16 @@ struct AppConfig {
         if let value = d.string(forKey: "baseURL")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.baseURL = value }
         if let value = d.string(forKey: "apiKey") { config.apiKey = value }
         config.backend = AIBackend.load(savedValue: d.string(forKey: "aiBackend"), apiKey: config.apiKey)
+        // A new user with only Claude Code installed starts on Claude instead
+        // of a Codex setup prompt.
+        if d.string(forKey: "aiBackend") == nil, config.backend == .codexCLI,
+           LocalCLI.executable(for: .codex) == nil, LocalCLI.executable(for: .claude) != nil {
+            config.backend = .claudeCLI
+        }
         config.codexPath = d.string(forKey: "codexPath") ?? ""
         config.codexModel = d.string(forKey: "codexModel") ?? ""
+        config.claudePath = d.string(forKey: "claudePath") ?? ""
+        config.claudeModel = d.string(forKey: "claudeModel") ?? ""
         if let value = d.string(forKey: "model")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.model = value }
         if let value = d.string(forKey: "targetLanguage")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.targetLanguage = value }
         if let featuresData = d.data(forKey: "featureConfigs"),
@@ -359,21 +371,30 @@ struct AppConfig {
         return config
     }
 
+    /// The selected local CLI with its path and model, or nil for API mode.
+    var localCLI: (tool: LocalCLITool, path: String, model: String)? {
+        switch backend {
+        case .codexCLI: return (.codex, codexPath, codexModel)
+        case .claudeCLI: return (.claude, claudePath, claudeModel)
+        case .chatAPI: return nil
+        }
+    }
+
     var hasRequiredConnectionSettings: Bool {
-        if backend == .codexCLI { return CodexCLI.executable(path: codexPath) != nil }
+        if let cli = localCLI { return LocalCLI.executable(for: cli.tool, path: cli.path) != nil }
         return !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var connectionSetupMessage: String {
-        backend == .codexCLI
-            ? "Install Codex CLI and run codex login in Terminal, or choose an API connection."
-            : "Add an API endpoint, key, and model to start running actions."
+        guard let cli = localCLI else { return "Add an API endpoint, key, and model to start running actions." }
+        return "Install \(cli.tool.displayName) and run \(cli.tool.loginCommand) in Terminal, or choose another AI connection."
     }
 
     var connectionModelName: String {
-        backend == .codexCLI ? (codexModel.isEmpty ? "Codex default" : codexModel) : model
+        guard let cli = localCLI else { return model }
+        return cli.model.isEmpty ? "\(cli.tool.displayName) default" : cli.model
     }
 
     func save() {
@@ -381,6 +402,8 @@ struct AppConfig {
         d.set(backend.rawValue, forKey: "aiBackend")
         d.set(codexPath, forKey: "codexPath")
         d.set(codexModel, forKey: "codexModel")
+        d.set(claudePath, forKey: "claudePath")
+        d.set(claudeModel, forKey: "claudeModel")
         d.set(baseURL, forKey: "baseURL")
         d.set(apiKey, forKey: "apiKey")
         d.set(model, forKey: "model")
@@ -921,8 +944,8 @@ final class TranslationService {
         instruction: String? = nil,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) {
-        if config.backend == .codexCLI {
-            _ = CodexCLI.run(prompt: config.resolvedPrompt(for: feature, text: text, instruction: instruction), model: config.codexModel, path: config.codexPath, completion: completion)
+        if let cli = config.localCLI {
+            _ = LocalCLI.run(tool: cli.tool, prompt: config.resolvedPrompt(for: feature, text: text, instruction: instruction), model: cli.model, path: cli.path, completion: completion)
             return
         }
         do {
@@ -973,8 +996,8 @@ final class TranslationService {
         onPartial: @escaping @Sendable (String) -> Void,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) -> TextProcessingRun {
-        if config.backend == .codexCLI {
-            let run = CodexCLI.run(prompt: config.resolvedPrompt(for: feature, text: text, instruction: instruction), model: config.codexModel, path: config.codexPath, onPartial: onPartial, completion: completion)
+        if let cli = config.localCLI {
+            let run = LocalCLI.run(tool: cli.tool, prompt: config.resolvedPrompt(for: feature, text: text, instruction: instruction), model: cli.model, path: cli.path, onPartial: onPartial, completion: completion)
             return TextProcessingRun(cancelHandler: { run.cancel() }, retaining: [run])
         }
         do {
@@ -1407,8 +1430,8 @@ enum FriendlyError {
     /// Maps transport and API errors to a short actionable message.
     /// `needsSettings` is true when the fix most likely lives in Settings.
     static func describe(_ error: Error) -> (message: String, needsSettings: Bool) {
-        if let codexError = error as? CodexCLIError {
-            return (codexError.localizedDescription, codexError.needsSettings)
+        if let cliError = error as? LocalCLIError {
+            return (cliError.localizedDescription, cliError.needsSettings)
         }
         if let urlError = error as? URLError {
             switch urlError.code {

@@ -1,6 +1,6 @@
 # Jit APP (macOS)
 
-A menu bar app for running AI actions on selected text globally on macOS, using your local Codex CLI login or an OpenAI-compatible Chat API.
+A menu bar app for running AI actions on selected text globally on macOS, using your local Codex CLI or Claude Code login, or an OpenAI-compatible Chat API.
 
 ## Features
 
@@ -15,8 +15,8 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 - The palette opens instantly at the selection, works without a selection (Custom), and is resizable once output appears
 - Recent Results in the menu bar reopen previous outputs; "Last Result" is one click away when nothing is selected
 - Speech uses the best installed English voice (premium/enhanced when available) with a shortcut to download better voices
-- Local Codex CLI mode reuses your saved login; no API key is required in Jit
-- Choose a local Codex model or an API `Base URL / API Key / Model`; settings are saved separately
+- Local Codex CLI and Claude Code CLI modes reuse your saved login; no API key is required in Jit
+- Choose a local Codex or Claude model, or an API `Base URL / API Key / Model`; settings are saved separately
 - Launch-at-login toggle from the menu bar
 
 ## Run Locally
@@ -56,7 +56,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build_app
 ## First-Time Setup
 
 1. Double-click `dist/Jit APP.app` to open it.
-2. Open Settings → AI Model. New users default to **Local Codex CLI**. Existing API configurations stay on **OpenAI-compatible API**.
+2. Open Settings → AI Model. New users default to **Local Codex CLI** (or **Local Claude Code CLI** when only Claude Code is installed). Existing API configurations stay on **OpenAI-compatible API**.
 3. For Codex, install the CLI and sign in once in Terminal:
 
    ```bash
@@ -64,19 +64,32 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build_app
    codex login
    ```
 
-   Jit automatically detects common installations, including Homebrew. Use **Codex path** for another install location. Leave **Model** blank for Codex's default, or enter a model supported by your Codex account. Click **Test Connection** to verify a real request.
+   For Claude Code, install it and sign in once:
+
+   ```bash
+   curl -fsSL https://claude.ai/install.sh | bash   # or: npm install -g @anthropic-ai/claude-code
+   claude auth login
+   ```
+
+   Jit automatically detects common installations, including Homebrew and `~/.local/bin`. Use **Codex path** / **Claude path** for another install location. Leave **Model** blank for the CLI's default, or enter a model your account supports (for Claude: `sonnet`, `haiku`, `opus`, or a full model name). Click **Test Connection** to verify a real request.
 
    For API mode, enter your Base URL, API Key and Model. Grant the requested macOS permissions in either mode.
 4. After setup is complete, Jit stays in the menu bar and no longer opens Settings on every launch.
 5. Select text in any app.
 6. Press the action palette hotkey (default: `Option + A`), choose an action, then run it.
 
-Codex uses saved CLI authentication without reading or copying tokens into Jit. Each request runs in a temporary directory using read-only, ephemeral non-interactive mode with user-configured tools disabled. Stop cancels the child process. CLI events can arrive as complete messages rather than individual tokens; the final response replaces earlier output. Codex needs internet access and available account usage. This integration is tested with Codex CLI 0.159.3; update an older CLI if Jit reports unsupported options. See the [official non-interactive documentation](https://developers.openai.com/codex/noninteractive).
+Both CLIs use their saved authentication; Jit never reads or copies tokens. Each request runs in a temporary directory, non-interactively, without session history, and with tools disabled:
+
+- Codex: `codex exec` in read-only, ephemeral mode with user config ignored. Its events arrive as whole messages rather than tokens.
+- Claude Code: `claude -p --safe-mode --tools ""` with a replacement system prompt, so CLAUDE.md, hooks, plugins, skills and MCP servers are not loaded. Text streams token by token. A prompt that starts with `/` is sent as text, not as a slash command.
+
+Stop cancels the child process, and the final response replaces streamed output. Apps opened from Finder do not inherit your shell's `https_proxy`; when it is missing, Jit passes the macOS system proxy (System Settings → Network) to the CLI. Without it, Codex can spend about two minutes retrying, and Claude can fail with `403 Request not allowed` on networks that need a proxy. Tested with Codex CLI 0.159.3 and Claude Code 2.1.286; update an older CLI if Jit reports unsupported options. See the [Codex non-interactive documentation](https://developers.openai.com/codex/noninteractive).
 
 ## Verification
 
 ```bash
 swift test
+JIT_LIVE_CLI=1 swift test --filter Live   # real Codex and Claude calls, Finder-like environment
 swift build
 ./scripts/release.sh
 ```
