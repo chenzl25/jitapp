@@ -13,7 +13,7 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 - Native macOS speech in Words (`⌥S` or the speaker button); pick the voice in Settings → General
 - Streaming AI output with in-panel Stop, Copy, and Replace controls
 - Copy returns only the generated output; Replace pastes the output back into the source app
-- Palette keyboard: `↑/↓` or `⌘1–4` switch actions (Translate, Polish, Custom, Words), `↩` runs, `⌘C` copies the result, `⌘↩` replaces, `⌥S` speaks in Words, `⎋` stops/closes
+- Palette keyboard: `tab` / `⇧tab` or `←/→` switch actions (Translate, Polish, Custom, Words; arrows move the caret while you edit an instruction), `↩` runs, `⌘C` copies the result, `⌘↩` replaces, `⌥S` speaks in Words, `⎋` stops/closes
 - Translate detects the source language and flips direction automatically (e.g. Chinese → English)
 - The palette opens instantly at the selection, works without a selection (Custom), and is resizable once output appears
 - Recent Results in the menu bar reopen previous outputs; "Last Result" is one click away when nothing is selected

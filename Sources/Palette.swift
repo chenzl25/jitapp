@@ -43,21 +43,19 @@ final class PaletteRootView: NSView {
     }
 }
 
-/// One segment of the mode switcher: icon, title and its ⌘ number.
+/// One segment of the mode switcher: icon and title.
 @MainActor
 final class ModeTabButton: NSButton {
     let titleText: String
     let symbolName: String
-    let keyText: String
     var isSelectedTab = false { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
     private var hovering = false
     private var trackingArea: NSTrackingArea?
 
-    init(title: String, symbol: String, key: String) {
+    init(title: String, symbol: String) {
         titleText = title
         symbolName = symbol
-        keyText = key
         super.init(frame: .zero)
         super.title = title
         isBordered = false
@@ -102,27 +100,16 @@ final class ModeTabButton: NSButton {
         }
         let ink = isSelectedTab ? Lantor.accent : Lantor.inkSecondary
         let titleAttrs: [NSAttributedString.Key: Any] = [.font: Lantor.font(13, isSelectedTab ? .semibold : .medium), .foregroundColor: ink]
-        let keyAttrs: [NSAttributedString.Key: Any] = [
-            .font: Lantor.font(11, .medium),
-            .foregroundColor: isSelectedTab ? Lantor.accent.withAlphaComponent(0.7) : Lantor.placeholder,
-        ]
         let titleSize = (titleText as NSString).size(withAttributes: titleAttrs)
-        let keySize = (keyText as NSString).size(withAttributes: keyAttrs)
         let icon = Lantor.symbol(symbolName, size: 13, weight: .medium, color: ink)
-        let iconWidth: CGFloat = icon == nil ? 0 : 16
-        let showKey = bounds.width > iconWidth + titleSize.width + keySize.width + 34
-        let total = iconWidth + 7 + titleSize.width + (showKey ? 7 + keySize.width : 0)
-        var x = (bounds.width - total) / 2
+        let iconWidth: CGFloat = icon == nil ? 0 : 16 + 7
+        var x = (bounds.width - iconWidth - titleSize.width) / 2
         if let icon {
             let size = icon.size
             icon.draw(in: NSRect(x: x + (16 - size.width) / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height))
-            x += 16 + 7
+            x += iconWidth
         }
         (titleText as NSString).draw(at: NSPoint(x: x, y: bounds.midY - titleSize.height / 2), withAttributes: titleAttrs)
-        x += titleSize.width + 7
-        if showKey {
-            (keyText as NSString).draw(at: NSPoint(x: x, y: bounds.midY - keySize.height / 2 - 0.5), withAttributes: keyAttrs)
-        }
         NSGraphicsContext.restoreGraphicsState()
     }
 }
@@ -394,8 +381,8 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         tabs.spacing = 4
         tabs.translatesAutoresizingMaskIntoConstraints = false
         modeButtons = modes.enumerated().map { index, mode in
-            let button = ModeTabButton(title: Self.compactTitle(for: mode), symbol: Self.symbol(for: mode), key: "⌘\(index + 1)")
-            button.toolTip = "\(Self.compactTitle(for: mode))  ⌘\(index + 1)"
+            let button = ModeTabButton(title: Self.compactTitle(for: mode), symbol: Self.symbol(for: mode))
+            button.toolTip = "\(Self.compactTitle(for: mode)) — tab or ← → to switch"
             button.onClick = { [weak self] in self?.selectMode(index) }
             tabs.addArrangedSubview(button)
             button.heightAnchor.constraint(equalToConstant: 32).isActive = true
@@ -700,7 +687,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         if key != hintsKey {
             hintsKey = key
             hintsRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            hintsRow.addArrangedSubview(lantorHint("⌘1–4", "Switch"))
+            hintsRow.addArrangedSubview(lantorHint("tab", "Switch"))
             if showSpeakHint {
                 hintsRow.addArrangedSubview(lantorHint("⌥S", "Speak"))
             }
@@ -942,10 +929,6 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
             return true
         }
         if flags == .command, let chars = event.charactersIgnoringModifiers {
-            if let digit = Int(chars), digit >= 1, digit <= modes.count {
-                selectMode(digit - 1)
-                return true
-            }
             if chars == "c" {
                 let outputHasSelection = window?.firstResponder === outputTextView && outputTextView.selectedRange().length > 0
                 if !rawOutput.isEmpty, !outputHasSelection, phase == .done {
@@ -966,6 +949,10 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
             speakTapped()
             return true
         }
+        if event.keyCode == 48, flags.isEmpty || flags == .shift { // Tab / ⇧Tab cycle modes
+            if !busy { moveMode(delta: flags == .shift ? -1 : 1) }
+            return true
+        }
         guard flags.isEmpty else { return false }
         if event.keyCode == 36 || event.keyCode == 76 { // Return / Enter
             if !busy {
@@ -973,12 +960,13 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
             }
             return true
         }
+        // ← / → switch modes unless they are moving the caret in a non-empty instruction.
         let editingText = window?.firstResponder === commandField.currentEditor() && !commandField.stringValue.isEmpty
-        if event.keyCode == 126, !editingText { // Up
+        if event.keyCode == 123, !editingText { // Left
             if !busy { moveMode(delta: -1) }
             return true
         }
-        if event.keyCode == 125, !editingText { // Down
+        if event.keyCode == 124, !editingText { // Right
             if !busy { moveMode(delta: 1) }
             return true
         }
