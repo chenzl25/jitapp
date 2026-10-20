@@ -13,9 +13,9 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 - Native macOS speech in Words (`⌥S` or the speaker button); pick the voice in Settings → General
 - Streaming AI output with in-panel Stop, Copy, and Replace controls
 - Copy returns only the generated output; Replace pastes the output back into the source app
-- Palette keyboard: `tab` / `⇧tab` or `←/→` switch actions (Translate, Polish, Custom, Words; arrows move the caret while you edit an instruction), `↩` runs, `⌘C` copies the result, `⌘↩` replaces, `⌥S` speaks in Words, `⎋` stops/closes
+- Palette keyboard: `tab` / `⇧tab` or the arrow keys switch actions (Translate, Polish, Custom, Words; `←`/`↑` previous, `→`/`↓` next; arrows move the caret while you edit an instruction), `↩` runs, `⌘C` copies the result, `⌘↩` replaces, `⌥S` speaks in Words, `⎋` stops/closes
 - Translate detects the source language and flips direction automatically (e.g. Chinese → English)
-- The palette opens instantly at the selection, works without a selection (Custom), and is resizable once output appears
+- The palette opens instantly at the selection on Translate, works without a selection (Custom), and is resizable once output appears
 - Recent Results in the menu bar reopen previous outputs; "Last Result" is one click away when nothing is selected
 - Speech uses the best installed English voice (premium/enhanced when available) with a shortcut to download better voices
 - Local Codex CLI and Claude Code CLI modes reuse your saved login; no API key is required in Jit

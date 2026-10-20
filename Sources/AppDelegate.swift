@@ -235,7 +235,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Fast path: synchronous Accessibility read while the source app still owns focus.
         let axSelection = captureService.readSelectionViaAccessibility()
         let anchor = axSelection?.bounds ?? NSRect(x: mouse.x, y: mouse.y, width: 1, height: 1)
-        let palette = makePalette(defaultModeID: feature.id, anchor: anchor, sourceApp: sourceApp)
+        // The palette shortcut opens on Translate; without a selection setSelection falls back to Custom.
+        let defaultModeID = config.features.contains(where: { $0.id == "translate" && $0.enabled }) ? "translate" : feature.id
+        let palette = makePalette(defaultModeID: defaultModeID, anchor: anchor, sourceApp: sourceApp)
         commandInputWindowController = palette
         if let axSelection {
             palette.setSelection(axSelection.text)

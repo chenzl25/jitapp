@@ -382,7 +382,7 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
         tabs.translatesAutoresizingMaskIntoConstraints = false
         modeButtons = modes.enumerated().map { index, mode in
             let button = ModeTabButton(title: Self.compactTitle(for: mode), symbol: Self.symbol(for: mode))
-            button.toolTip = "\(Self.compactTitle(for: mode)) — tab or ← → to switch"
+            button.toolTip = "\(Self.compactTitle(for: mode)) — tab or arrow keys to switch"
             button.onClick = { [weak self] in self?.selectMode(index) }
             tabs.addArrangedSubview(button)
             button.heightAnchor.constraint(equalToConstant: 32).isActive = true
@@ -960,13 +960,13 @@ final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
             }
             return true
         }
-        // ← / → switch modes unless they are moving the caret in a non-empty instruction.
+        // ←/↑ go to the previous mode and →/↓ to the next, unless they are moving the caret in a non-empty instruction.
         let editingText = window?.firstResponder === commandField.currentEditor() && !commandField.stringValue.isEmpty
-        if event.keyCode == 123, !editingText { // Left
+        if event.keyCode == 123 || event.keyCode == 126, !editingText { // Left / Up
             if !busy { moveMode(delta: -1) }
             return true
         }
-        if event.keyCode == 124, !editingText { // Right
+        if event.keyCode == 124 || event.keyCode == 125, !editingText { // Right / Down
             if !busy { moveMode(delta: 1) }
             return true
         }
