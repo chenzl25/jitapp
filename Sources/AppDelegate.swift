@@ -259,7 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makePalette(defaultModeID: String, anchor: NSRect, sourceApp: NSRunningApplication?) -> CommandInputWindowController {
-        let modeIDs = ["custom", "refine", "translate", "vocabulary"]
+        let modeIDs = ["translate", "refine", "custom", "vocabulary"]
         let modes = modeIDs.compactMap { id -> CommandInputWindowController.Mode? in
             guard let f = config.features.first(where: { $0.id == id && $0.enabled }) else { return nil }
             let promptPreview = f.promptTemplate
@@ -277,6 +277,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let palette = CommandInputWindowController(anchor: anchor, modes: modes, defaultModeID: defaultModeID)
         palette.lastResult = HistoryStore.shared.entries.first
         palette.speechVoiceDescription = speechService.voiceDescription
+        palette.modelLabel = config.connectionShortLabel
+        palette.recentInstructions = HistoryStore.shared.recentInstructions(limit: 3)
+        palette.directionLabel = { [weak self] text in
+            self?.config.translationDirectionLabel(for: text)
+        }
         // Setup problems are shown inline; the hotkey never redirects to Settings.
         palette.setupNotice = setupStatus().paletteNotice
         palette.onSubmit = { [weak self] modeID, instruction, selectedText, onPartial, completion in
@@ -433,6 +438,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.voiceInfo = { [weak self] in
             guard let self else { return (description: "", highQuality: true) }
             return (description: self.speechService.voiceDescription, highQuality: self.speechService.hasHighQualityVoice)
+        }
+        controller.voiceOptions = {
+            SpeechService.englishVoices().map { voice in
+                let region = voice.language == "en-US" ? "" : " · \(voice.language)"
+                return (id: voice.identifier, name: "\(voice.name) (\(SpeechService.qualityLabel(voice.quality)))\(region)")
+            }
+        }
+        controller.selectedVoiceID = { [weak self] in
+            self?.speechService.selectedVoiceIdentifier
+        }
+        controller.onSelectVoice = { [weak self] identifier in
+            self?.speechService.selectVoice(identifier: identifier)
         }
         controller.onOpenVoiceSettings = { [weak self] in
             self?.openSpokenContentSettings()

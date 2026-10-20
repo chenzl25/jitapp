@@ -13,10 +13,12 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .executableTarget(
             name: "fanyiapp",
-            dependencies: ["JitCLI"],
+            dependencies: ["JitCLI", "JitText"],
             path: "Sources",
-            exclude: ["JitCLI"]),
+            exclude: ["JitCLI", "JitText"]),
         .target(name: "JitCLI", path: "Sources/JitCLI"),
+        .target(name: "JitText", path: "Sources/JitText"),
         .testTarget(name: "JitCLITests", dependencies: ["JitCLI"]),
+        .testTarget(name: "JitTextTests", dependencies: ["JitText"]),
     ]
 )

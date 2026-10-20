@@ -16,11 +16,12 @@ struct SetupStatus {
 
     var permissionsGranted: Bool { accessibility && inputMonitoring && postEvents }
     var isReady: Bool { connectionConfigured && permissionsGranted && hotkeyRegistered }
+    var missingPermissionCount: Int { [accessibility, inputMonitoring, postEvents].filter { !$0 }.count }
 
     /// One-line problem statement for the Settings banner and the menu bar. `nil` when everything is ready.
     var headline: String? {
         if !permissionsGranted {
-            return "Grant system permissions so Jit can read and replace selected text."
+            return "Jit needs system permissions to read and replace selected text."
         }
         if !connectionConfigured {
             return connectionProblem
@@ -70,15 +71,18 @@ struct ShortcutDraft: Equatable {
 
     var hasModifier: Bool { option || command || control || shift }
 
-    var display: String {
+    /// Modifier glyphs then the key, e.g. ["⌥", "A"].
+    var parts: [String] {
         var parts: [String] = []
         if control { parts.append("⌃") }
         if option { parts.append("⌥") }
         if shift { parts.append("⇧") }
         if command { parts.append("⌘") }
         parts.append(key.uppercased())
-        return parts.joined()
+        return parts
     }
+
+    var display: String { parts.joined() }
 
     func apply(to feature: inout FeatureConfig) {
         feature.hotkeyKey = key
@@ -86,6 +90,194 @@ struct ShortcutDraft: Equatable {
         feature.hotkeyCommand = command
         feature.hotkeyControl = control
         feature.hotkeyShift = shift
+    }
+}
+
+// MARK: - Settings building blocks
+
+/// Sidebar navigation row: icon, title, optional warning badge.
+@MainActor
+final class SidebarItemButton: NSButton {
+    let titleText: String
+    let symbolName: String
+    var isSelectedItem = false { didSet { needsDisplay = true } }
+    var badge: String? { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
+    private var hovering = false
+    private var trackingArea: NSTrackingArea?
+
+    init(title: String, symbol: String) {
+        titleText = title
+        symbolName = symbol
+        super.init(frame: .zero)
+        super.title = title
+        isBordered = false
+        translatesAutoresizingMaskIntoConstraints = false
+        target = self
+        action = #selector(clicked)
+        focusRingType = .none
+        heightAnchor.constraint(equalToConstant: 36).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func clicked() { onClick?() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
+        if isSelectedItem {
+            Lantor.selectedFill.setFill()
+            path.fill()
+            Lantor.selectedBorder.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        } else if hovering {
+            Lantor.hover.setFill()
+            path.fill()
+        }
+        if let icon = Lantor.symbol(symbolName, size: 14, weight: .medium, color: isSelectedItem ? Lantor.accent : Lantor.muted) {
+            let size = icon.size
+            icon.draw(in: NSRect(x: 10 + (20 - size.width) / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height))
+        }
+        let attrs: [NSAttributedString.Key: Any] = [.font: Lantor.font(14, isSelectedItem ? .semibold : .medium), .foregroundColor: Lantor.ink]
+        let size = (titleText as NSString).size(withAttributes: attrs)
+        (titleText as NSString).draw(at: NSPoint(x: 40, y: bounds.midY - size.height / 2), withAttributes: attrs)
+        if let badge {
+            let badgeAttrs: [NSAttributedString.Key: Any] = [.font: Lantor.font(11, .bold), .foregroundColor: Lantor.warning]
+            let badgeSize = (badge as NSString).size(withAttributes: badgeAttrs)
+            let width = max(22, badgeSize.width + 12)
+            let rect = NSRect(x: bounds.maxX - 10 - width, y: bounds.midY - 9, width: width, height: 18)
+            let pill = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 9, yRadius: 9)
+            Lantor.warningSoft.setFill()
+            pill.fill()
+            Lantor.warningBorder.setStroke()
+            pill.stroke()
+            (badge as NSString).draw(at: NSPoint(x: rect.midX - badgeSize.width / 2, y: rect.midY - badgeSize.height / 2), withAttributes: badgeAttrs)
+        }
+    }
+}
+
+/// Selectable card (connection type): icon tile, title and a short description.
+@MainActor
+final class ChoiceCard: NSView {
+    var isSelected = false { didSet { tile.selected = isSelected; titleLabel.textColor = isSelected ? Lantor.accent : Lantor.ink; needsDisplay = true } }
+    var onClick: (() -> Void)?
+    private let tile: LantorIconTile
+    private let titleLabel: NSTextField
+    private var hovering = false
+    private var trackingArea: NSTrackingArea?
+
+    init(symbol: String, title: String, detail: String) {
+        tile = LantorIconTile(symbol)
+        titleLabel = Lantor.label(title, Lantor.font(14, .semibold), Lantor.ink)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        let detailLabel = Lantor.label(detail, Lantor.font(12), Lantor.muted, lines: 2)
+        let text = NSStackView(views: [titleLabel, detailLabel])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 2
+        let row = NSStackView(views: [tile, text])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 10
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            row.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 72),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 2, dy: 2)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 13, yRadius: 13)
+        Lantor.panelStrong.setFill()
+        path.fill()
+        if isSelected {
+            Lantor.selectedFill.setFill()
+            path.fill()
+            let halo = NSBezierPath(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), xRadius: 14.5, yRadius: 14.5)
+            halo.lineWidth = 3
+            Lantor.focusRing.setStroke()
+            halo.stroke()
+            Lantor.accent.setStroke()
+            path.lineWidth = 1.5
+            path.stroke()
+        } else {
+            (hovering ? Lantor.lineStrong : Lantor.line).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+}
+
+/// Flipped vertical stack so scrolled pages start at the top.
+@MainActor
+final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
+@MainActor
+final class SettingsSidebarView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        Lantor.sidebar.setFill()
+        bounds.fill()
+        Lantor.line.setFill()
+        NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height).fill()
+    }
+}
+
+@MainActor
+final class SettingsHeaderView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        Lantor.panel.withAlphaComponent(0.92).setFill()
+        bounds.fill()
+        Lantor.line.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+    }
+}
+
+@MainActor
+final class SettingsBackgroundView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        Lantor.appBackground.setFill()
+        bounds.fill()
     }
 }
 
@@ -110,64 +302,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         var subtitle: String {
             switch self {
-            case .general: return "Shortcut, startup, translation, and voice"
-            case .model: return "Local Codex, Claude Code, or an API connection"
-            case .actions: return "Prompts behind Translate, Refine, Vocabulary, and Custom"
-            case .permissions: return "System access Jit needs to read and replace text"
+            case .general: return "Shortcut, startup, translation and voice."
+            case .model: return "Use your local Codex or Claude Code login, or an OpenAI-compatible API."
+            case .actions: return "The prompts behind Translate, Polish, Custom and Words."
+            case .permissions: return "System access Jit needs to read and replace selected text."
             }
         }
 
         var symbol: String {
             switch self {
             case .general: return "gearshape"
-            case .model: return "network"
+            case .model: return "cpu"
             case .actions: return "text.bubble"
-            case .permissions: return "lock.shield"
+            case .permissions: return "checkmark.shield"
             }
         }
     }
 
-    @MainActor
     private enum Theme {
-        static let sidebarWidth: CGFloat = 220
-        static let contentPadding: CGFloat = 24
-        static let sectionSpacing: CGFloat = 16
-        static let cardPadding: CGFloat = 18
-        static let cardCornerRadius: CGFloat = 12
-        static let fieldCornerRadius: CGFloat = 8
-        static let titlebarInset: CGFloat = 52
-
-        static let sidebarSelection = NSColor.controlAccentColor.withAlphaComponent(0.16)
-        static let cardStroke = NSColor.separatorColor.withAlphaComponent(0.42)
-        static let fieldBackground = NSColor.controlBackgroundColor.withAlphaComponent(0.82)
-        static let okColor = NSColor.systemGreen
-        static let warnColor = NSColor.systemOrange
-        static let errorColor = NSColor.systemRed
-
-        static let sectionTitleFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
-        static let bodyFont = NSFont.systemFont(ofSize: 13)
-        static let captionFont = NSFont.systemFont(ofSize: 12)
-        static let monoFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+        static let sidebarWidth: CGFloat = 236
+        static let contentPadding: CGFloat = 30
+        static let titlebarInset: CGFloat = 50
+        static let labelColumn: CGFloat = 132
     }
 
-    @MainActor
     private enum FeedbackKind {
         case neutral
         case success
         case error
-
-        var color: NSColor {
-            switch self {
-            case .neutral: return .secondaryLabelColor
-            case .success: return Theme.okColor
-            case .error: return Theme.errorColor
-            }
-        }
-    }
-
-    @MainActor
-    final class FlippedStackView: NSStackView {
-        override var isFlipped: Bool { true }
     }
 
     // MARK: Callbacks (wired by AppDelegate)
@@ -185,6 +347,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     /// Returns an error message when toggling failed.
     var onToggleLoginItem: (() -> String?)?
     var voiceInfo: (() -> (description: String, highQuality: Bool))?
+    /// Installed English voices (best first) and the saved choice (nil = automatic).
+    var voiceOptions: (() -> [(id: String, name: String)])?
+    var selectedVoiceID: (() -> String?)?
+    var onSelectVoice: ((String?) -> Void)?
     var onOpenVoiceSettings: (() -> Void)?
     var onClose: (() -> Void)?
 
@@ -197,38 +363,43 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let codexModelField = NSTextField(string: "")
     private let claudePathField = NSTextField(string: "")
     private let claudeModelField = NSTextField(string: "")
-    private let backendPicker = NSPopUpButton()
     private var backend: AIBackend
-    private let targetLanguageField = NSTextField(string: "")
+    private var targetLanguage: String
     private var featureConfigs: [FeatureConfig]
     private var shortcut: ShortcutDraft
     private var status: SetupStatus?
 
     // MARK: Views
 
-    private var sectionButtons: [Section: NSButton] = [:]
-    private var sectionBadges: [Section: NSView] = [:]
+    private var sectionButtons: [Section: SidebarItemButton] = [:]
     private var sectionPages: [Section: NSView] = [:]
     private var currentSection: Section = .general
-    private weak var detailTitleLabel: NSTextField?
-    private weak var detailSubtitleLabel: NSTextField?
-    private weak var detailPageStack: NSStackView?
-    private weak var bannerView: NSView?
-    private weak var bannerLabel: NSTextField?
-    private weak var bannerButton: NSButton?
+    private let detailTitleLabel = Lantor.label("", Lantor.font(21, .bold), Lantor.ink)
+    private let detailSubtitleLabel = Lantor.label("", Lantor.font(13), Lantor.muted)
+    private let savedIcon = NSImageView()
+    private let savedLabel = Lantor.label("Saved automatically", Lantor.font(12), Lantor.muted)
+    private let pageStack = FlippedStackView()
+    private let banner = LantorSurface(fill: Lantor.warningSoft, stroke: Lantor.warningBorder, radius: 13)
+    private let bannerLabel = Lantor.label("", Lantor.font(13, .medium), Lantor.warning, lines: 2)
+    private let bannerButton = LantorButton("Fix", kind: .secondary)
     private var bannerTarget: Section = .permissions
-    private weak var toastLabel: NSTextField?
+    private let statusTitle = Lantor.label("", Lantor.font(13, .semibold), Lantor.ink)
+    private let statusDetail = Lantor.label("", Lantor.font(12.5), Lantor.muted, lines: 3)
     private var toastWorkItem: DispatchWorkItem?
 
-    private weak var shortcutButton: NSButton?
-    private weak var shortcutStatusLabel: NSTextField?
-    private weak var testButton: NSButton?
+    private var shortcutKeys: NSStackView?
+    private weak var shortcutChip: LantorChip?
+    private weak var shortcutDetail: NSTextField?
+    private weak var shortcutButton: LantorButton?
+    private weak var testButton: LantorButton?
     private weak var testSpinner: NSProgressIndicator?
-    private weak var testResultLabel: NSTextField?
+    private weak var testChip: LantorChip?
+    private weak var testErrorLabel: NSTextField?
+    private weak var cliLocationIcon: NSImageView?
     private weak var cliLocationLabel: NSTextField?
     private var connectionTestGeneration = 0
-    private weak var loginItemCheckbox: NSButton?
-    private weak var loginItemStatusLabel: NSTextField?
+    private weak var loginSwitch: NSSwitch?
+    private weak var loginDetail: NSTextField?
     private weak var permissionsFeedbackLabel: NSTextField?
 
     private var hotkeyCaptureMonitor: Any?
@@ -241,21 +412,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     init(config: AppConfig) {
         backend = config.backend
+        targetLanguage = config.targetLanguage
         featureConfigs = config.features
         let entry = config.features.first(where: { $0.id == "custom" }) ?? AppConfig.defaults.features[0]
         shortcut = ShortcutDraft(feature: entry)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 880, height: 600),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 660),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Jit Settings"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.minSize = NSSize(width: 780, height: 520)
+        window.minSize = NSSize(width: 820, height: 560)
         window.isReleasedWhenClosed = false
+        window.backgroundColor = Lantor.appBackground
         super.init(window: window)
         window.delegate = self
         if !window.setFrameUsingName(Self.frameAutosaveName) {
@@ -270,7 +443,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         codexModelField.stringValue = config.codexModel
         claudePathField.stringValue = config.claudePath
         claudeModelField.stringValue = config.claudeModel
-        targetLanguageField.stringValue = config.targetLanguage
 
         configureInputFields()
         buildUI()
@@ -315,10 +487,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         status = statusProvider?()
         updateBanner()
         updateBadges()
+        updateSidebarStatus()
         updateShortcutStatus()
         sectionPages[.permissions] = nil
         if currentSection == .permissions {
-            showSection(.permissions, animated: false)
+            showSection(.permissions, animated: false, force: true)
         }
     }
 
@@ -341,7 +514,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             baseURL: baseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             model: modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            targetLanguage: targetLanguageField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            targetLanguage: targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines),
             features: features
         )
     }
@@ -368,7 +541,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         connectionTestGeneration += 1
         testButton?.isEnabled = true
         testSpinner?.stopAnimation(nil)
-        testResultLabel?.stringValue = ""
+        testChip?.isHidden = true
+        testErrorLabel?.isHidden = true
     }
 
     /// Path and model fields for the selected local CLI.
@@ -385,8 +559,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private func updateCLILocation() {
         guard let cli = cliFields else { return }
         let found = LocalCLI.executable(for: cli.tool, path: cli.path.stringValue)
-        cliLocationLabel?.stringValue = found.map { "Found: " + $0.path } ?? "Install \(cli.tool.displayName), then run \(cli.tool.loginCommand) in Terminal."
-        cliLocationLabel?.textColor = found == nil ? Theme.warnColor : .secondaryLabelColor
+        let text = NSMutableAttributedString()
+        if let found {
+            text.append(NSAttributedString(string: "Detected  ", attributes: [.font: Lantor.font(12, .medium), .foregroundColor: Lantor.success]))
+            text.append(NSAttributedString(string: found.path, attributes: [.font: Lantor.mono(11.5), .foregroundColor: Lantor.success]))
+        } else {
+            text.append(NSAttributedString(
+                string: "Not found. Install \(cli.tool.displayName), then run \(cli.tool.loginCommand) in Terminal.",
+                attributes: [.font: Lantor.font(12, .medium), .foregroundColor: Lantor.warning]
+            ))
+        }
+        cliLocationLabel?.attributedStringValue = text
+        cliLocationIcon?.image = found == nil
+            ? Lantor.symbol("exclamationmark.triangle.fill", size: 11, weight: .semibold, color: Lantor.warning)
+            : Lantor.symbol("checkmark", size: 11, weight: .bold, color: Lantor.success)
     }
 
     // MARK: Escape closes the window (unless a text field or the recorder owns the key)
@@ -410,38 +596,50 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     // MARK: UI construction
 
     private func configureInputFields() {
-        [baseURLField, apiKeyField, modelField, codexPathField, codexModelField, claudePathField, claudeModelField, targetLanguageField].forEach { field in
-            field.font = NSFont.systemFont(ofSize: 14)
-            field.focusRingType = .default
+        [baseURLField, apiKeyField, modelField, codexPathField, codexModelField, claudePathField, claudeModelField].forEach { field in
+            field.font = Lantor.font(13)
+            field.textColor = Lantor.ink
+            field.focusRingType = .none
             field.drawsBackground = false
             field.isBordered = false
             field.delegate = self
+            field.usesSingleLineMode = true
+            field.cell?.isScrollable = true
+            field.lineBreakMode = .byTruncatingTail
             field.setContentHuggingPriority(.defaultLow, for: .horizontal)
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             field.translatesAutoresizingMaskIntoConstraints = false
         }
-        baseURLField.placeholderString = "https://api.openai.com/v1"
-        apiKeyField.placeholderString = "sk-…"
-        modelField.placeholderString = "gpt-4o-mini"
-        codexPathField.placeholderString = "Automatic detection"
-        codexModelField.placeholderString = "Default Codex model"
-        claudePathField.placeholderString = "Automatic detection"
-        claudeModelField.placeholderString = "Default Claude model, or sonnet / haiku / opus"
-        targetLanguageField.placeholderString = "Chinese"
+        func placeholder(_ field: NSTextField, _ text: String) {
+            field.placeholderAttributedString = NSAttributedString(string: text, attributes: [.foregroundColor: Lantor.placeholder, .font: Lantor.font(13)])
+        }
+        placeholder(baseURLField, "https://api.openai.com/v1")
+        placeholder(apiKeyField, "sk-…")
+        placeholder(modelField, "gpt-4o-mini")
+        placeholder(codexPathField, "Auto-detect")
+        placeholder(codexModelField, "Codex default")
+        placeholder(claudePathField, "Auto-detect")
+        placeholder(claudeModelField, "Claude default, or sonnet / haiku / opus")
     }
 
     private func buildUI() {
         guard let contentView = window?.contentView else { return }
         contentView.subviews.forEach { $0.removeFromSuperview() }
         sectionButtons.removeAll()
-        sectionBadges.removeAll()
         sectionPages.removeAll()
 
+        let background = SettingsBackgroundView()
+        background.translatesAutoresizingMaskIntoConstraints = false
         let sidebar = sidebarView()
         let detail = detailView()
+        contentView.addSubview(background)
         contentView.addSubview(sidebar)
         contentView.addSubview(detail)
         NSLayoutConstraint.activate([
+            background.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            background.topAnchor.constraint(equalTo: contentView.topAnchor),
+            background.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             sidebar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: contentView.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -449,249 +647,179 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             detail.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             detail.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             detail.topAnchor.constraint(equalTo: contentView.topAnchor),
-            detail.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+            detail.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
         ])
 
         showSection(.general, animated: false)
     }
 
     private func sidebarView() -> NSView {
-        let sidebar = NSVisualEffectView()
-        sidebar.material = .sidebar
-        sidebar.state = .followsWindowActiveState
-        sidebar.blendingMode = .behindWindow
+        let sidebar = SettingsSidebarView()
         sidebar.translatesAutoresizingMaskIntoConstraints = false
 
-        let iconView = NSImageView()
-        if let image = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "Jit") {
-            iconView.image = image
-            iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 26, weight: .semibold)
-            iconView.contentTintColor = .controlAccentColor
-        }
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        iconView.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        let appTitle = Lantor.label("Jit", Lantor.font(18, .bold), Lantor.ink)
+        let appSubtitle = Lantor.label("Settings", Lantor.font(12), Lantor.muted)
+        let identity = NSStackView(views: [appTitle, appSubtitle])
+        identity.orientation = .vertical
+        identity.alignment = .leading
+        identity.spacing = 0
+        let workspace = NSStackView(views: [LantorAppIcon(size: 30), identity])
+        workspace.orientation = .horizontal
+        workspace.alignment = .centerY
+        workspace.spacing = 10
+        workspace.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
 
-        let appTitle = label("Jit", font: NSFont.systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
-        let appSubtitle = label("Settings", font: Theme.captionFont, color: .secondaryLabelColor)
-        let identityStack = NSStackView(views: [appTitle, appSubtitle])
-        identityStack.orientation = .vertical
-        identityStack.spacing = 1
-        identityStack.alignment = .leading
+        let navLabel = Lantor.legend("Preferences")
+        let navLabelRow = NSStackView(views: [navLabel])
+        navLabelRow.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 0)
 
-        let topRow = NSStackView(views: [iconView, identityStack])
-        topRow.orientation = .horizontal
-        topRow.spacing = 10
-        topRow.alignment = .centerY
-
-        let navStack = NSStackView()
-        navStack.orientation = .vertical
-        navStack.spacing = 4
-        navStack.alignment = .leading
+        let nav = NSStackView()
+        nav.orientation = .vertical
+        nav.alignment = .leading
+        nav.spacing = 2
+        nav.translatesAutoresizingMaskIntoConstraints = false
         for section in Section.allCases {
-            navStack.addArrangedSubview(sidebarItem(for: section))
+            let item = SidebarItemButton(title: section.title, symbol: section.symbol)
+            item.onClick = { [weak self] in self?.showSection(section, animated: true) }
+            sectionButtons[section] = item
+            nav.addArrangedSubview(item)
+            item.widthAnchor.constraint(equalTo: nav.widthAnchor).isActive = true
         }
 
-        let container = NSStackView(views: [topRow, navStack])
-        container.orientation = .vertical
-        container.spacing = 18
-        container.alignment = .leading
-        container.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(container)
+        let top = NSStackView(views: [workspace, navLabelRow, nav])
+        top.orientation = .vertical
+        top.alignment = .leading
+        top.spacing = 6
+        top.setCustomSpacing(18, after: workspace)
+        top.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(top)
 
-        let divider = NSBox()
-        divider.boxType = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(divider)
+        // Readiness card pinned to the bottom of the sidebar.
+        let statusCard = LantorSurface(fill: Lantor.panelStrong, stroke: Lantor.line, radius: 13)
+        let dotView = StatusDotView()
+        statusDotView = dotView
+        let titleRow = NSStackView(views: [dotView, statusTitle])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 8
+        let statusStack = NSStackView(views: [titleRow, statusDetail])
+        statusStack.orientation = .vertical
+        statusStack.alignment = .leading
+        statusStack.spacing = 4
+        statusStack.translatesAutoresizingMaskIntoConstraints = false
+        statusCard.addSubview(statusStack)
+        sidebar.addSubview(statusCard)
 
         NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 14),
-            container.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -14),
-            container.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: Theme.titlebarInset),
-            divider.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            divider.topAnchor.constraint(equalTo: sidebar.topAnchor),
-            divider.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
-            divider.widthAnchor.constraint(equalToConstant: 1)
+            top.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 14),
+            top.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -14),
+            top.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: Theme.titlebarInset),
+            nav.widthAnchor.constraint(equalTo: top.widthAnchor),
+            statusCard.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 14),
+            statusCard.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -15),
+            statusCard.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -14),
+            statusStack.leadingAnchor.constraint(equalTo: statusCard.leadingAnchor, constant: 12),
+            statusStack.trailingAnchor.constraint(equalTo: statusCard.trailingAnchor, constant: -12),
+            statusStack.topAnchor.constraint(equalTo: statusCard.topAnchor, constant: 10),
+            statusStack.bottomAnchor.constraint(equalTo: statusCard.bottomAnchor, constant: -11),
+            statusDetail.widthAnchor.constraint(equalTo: statusStack.widthAnchor),
         ])
+        statusDetail.preferredMaxLayoutWidth = Theme.sidebarWidth - 29 - 24
         return sidebar
     }
 
-    private func sidebarItem(for section: Section) -> NSView {
-        let button = NSButton(title: section.title, target: self, action: #selector(sidebarSectionTapped(_:)))
-        button.identifier = NSUserInterfaceItemIdentifier(section.rawValue)
-        button.setButtonType(.momentaryChange)
-        button.isBordered = false
-        button.alignment = .left
-        button.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        button.imagePosition = .imageLeading
-        button.imageHugsTitle = true
-        if let image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.title) {
-            button.image = image
-            button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-        }
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 7
-        button.layer?.masksToBounds = true
-        button.translatesAutoresizingMaskIntoConstraints = false
-        sectionButtons[section] = button
-
-        let badge = NSView()
-        badge.wantsLayer = true
-        badge.layer?.backgroundColor = Theme.warnColor.cgColor
-        badge.layer?.cornerRadius = 4
-        badge.translatesAutoresizingMaskIntoConstraints = false
-        badge.isHidden = true
-        badge.toolTip = "Needs attention"
-        sectionBadges[section] = badge
-
-        let item = NSView()
-        item.translatesAutoresizingMaskIntoConstraints = false
-        item.addSubview(button)
-        item.addSubview(badge)
-        NSLayoutConstraint.activate([
-            item.widthAnchor.constraint(equalToConstant: Theme.sidebarWidth - 28),
-            item.heightAnchor.constraint(equalToConstant: 30),
-            button.leadingAnchor.constraint(equalTo: item.leadingAnchor),
-            button.trailingAnchor.constraint(equalTo: item.trailingAnchor),
-            button.topAnchor.constraint(equalTo: item.topAnchor),
-            button.bottomAnchor.constraint(equalTo: item.bottomAnchor),
-            badge.widthAnchor.constraint(equalToConstant: 8),
-            badge.heightAnchor.constraint(equalToConstant: 8),
-            badge.trailingAnchor.constraint(equalTo: item.trailingAnchor, constant: -10),
-            badge.centerYAnchor.constraint(equalTo: item.centerYAnchor)
-        ])
-        return item
-    }
-
-    @objc private func sidebarSectionTapped(_ sender: NSButton) {
-        guard let raw = sender.identifier?.rawValue, let section = Section(rawValue: raw) else { return }
-        showSection(section, animated: true)
-    }
+    private var statusDotView: StatusDotView?
 
     private func detailView() -> NSView {
         let detail = NSView()
         detail.translatesAutoresizingMaskIntoConstraints = false
 
-        let background = NSVisualEffectView()
-        background.material = .windowBackground
-        background.state = .followsWindowActiveState
-        background.blendingMode = .behindWindow
-        background.translatesAutoresizingMaskIntoConstraints = false
-        detail.addSubview(background)
+        let header = SettingsHeaderView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        let titles = NSStackView(views: [detailTitleLabel, detailSubtitleLabel])
+        titles.orientation = .vertical
+        titles.alignment = .leading
+        titles.spacing = 3
+        titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detailSubtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        savedIcon.image = Lantor.symbol("checkmark", size: 11, weight: .bold, color: Lantor.success)
+        savedIcon.setContentHuggingPriority(.required, for: .horizontal)
+        savedLabel.setContentHuggingPriority(.required, for: .horizontal)
+        let saved = NSStackView(views: [savedIcon, savedLabel])
+        saved.orientation = .horizontal
+        saved.alignment = .centerY
+        saved.spacing = 5
+        saved.setContentHuggingPriority(.required, for: .horizontal)
+        saved.translatesAutoresizingMaskIntoConstraints = false
+        titles.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(titles)
+        header.addSubview(saved)
 
-        let titleLabel = label("", font: NSFont.systemFont(ofSize: 24, weight: .semibold), color: .labelColor)
-        let subtitleLabel = label("", font: Theme.bodyFont, color: .secondaryLabelColor)
-        subtitleLabel.maximumNumberOfLines = 2
-        detailTitleLabel = titleLabel
-        detailSubtitleLabel = subtitleLabel
-
-        let headerStack = NSStackView(views: [titleLabel, subtitleLabel])
-        headerStack.orientation = .vertical
-        headerStack.spacing = 3
-        headerStack.alignment = .leading
-        headerStack.translatesAutoresizingMaskIntoConstraints = false
-
-        let banner = setupBannerView()
+        // Banner (setup problems) sits above the page inside the scroll content.
+        let bannerIcon = NSImageView()
+        bannerIcon.image = Lantor.symbol("exclamationmark.triangle.fill", size: 14, weight: .semibold, color: Lantor.warning)
+        bannerIcon.setContentHuggingPriority(.required, for: .horizontal)
+        bannerButton.height = 26
+        bannerButton.fontSize = 12
+        bannerButton.onClick = { [weak self] in self?.bannerActionTapped() }
+        let bannerSpacer = NSView()
+        bannerSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        bannerLabel.preferredMaxLayoutWidth = 440
+        let bannerRow = NSStackView(views: [bannerIcon, bannerLabel, bannerSpacer, bannerButton])
+        bannerRow.orientation = .horizontal
+        bannerRow.alignment = .centerY
+        bannerRow.spacing = 10
+        bannerRow.translatesAutoresizingMaskIntoConstraints = false
+        bannerLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        banner.addSubview(bannerRow)
+        NSLayoutConstraint.activate([
+            bannerRow.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 14),
+            bannerRow.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -10),
+            bannerRow.topAnchor.constraint(equalTo: banner.topAnchor, constant: 9),
+            bannerRow.bottomAnchor.constraint(equalTo: banner.bottomAnchor, constant: -9),
+        ])
+        banner.isHidden = true
+        banner.draggable = false
 
         let pageScroll = NSScrollView()
         pageScroll.translatesAutoresizingMaskIntoConstraints = false
         pageScroll.hasVerticalScroller = true
+        pageScroll.autohidesScrollers = true
         pageScroll.borderType = .noBorder
         pageScroll.drawsBackground = false
-        pageScroll.contentInsets = NSEdgeInsets(top: 4, left: Theme.contentPadding, bottom: Theme.contentPadding, right: Theme.contentPadding)
-        let pageStack = FlippedStackView()
+        pageScroll.automaticallyAdjustsContentInsets = false
+        pageScroll.contentInsets = NSEdgeInsets(top: 20, left: Theme.contentPadding, bottom: 28, right: Theme.contentPadding)
         pageStack.orientation = .vertical
         pageStack.alignment = .leading
-        pageStack.spacing = 0
+        pageStack.spacing = 20
         pageStack.translatesAutoresizingMaskIntoConstraints = false
         pageScroll.documentView = pageStack
-        detailPageStack = pageStack
+        pageStack.addArrangedSubview(banner)
+        banner.widthAnchor.constraint(equalTo: pageStack.widthAnchor).isActive = true
 
-        let toast = label("", font: Theme.captionFont, color: .secondaryLabelColor)
-        toast.maximumNumberOfLines = 1
-        toast.lineBreakMode = .byTruncatingTail
-        toast.translatesAutoresizingMaskIntoConstraints = false
-        toastLabel = toast
-
-        detail.addSubview(headerStack)
-        detail.addSubview(banner)
+        detail.addSubview(header)
         detail.addSubview(pageScroll)
-        detail.addSubview(toast)
         NSLayoutConstraint.activate([
-            background.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
-            background.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
-            background.topAnchor.constraint(equalTo: detail.topAnchor),
-            background.bottomAnchor.constraint(equalTo: detail.bottomAnchor),
-
-            headerStack.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: Theme.contentPadding),
-            headerStack.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -Theme.contentPadding),
-            headerStack.topAnchor.constraint(equalTo: detail.topAnchor, constant: 30),
-
-            banner.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: Theme.contentPadding),
-            banner.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -Theme.contentPadding),
-            banner.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 14),
+            header.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
+            header.topAnchor.constraint(equalTo: detail.topAnchor),
+            titles.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: Theme.contentPadding),
+            titles.trailingAnchor.constraint(lessThanOrEqualTo: saved.leadingAnchor, constant: -16),
+            titles.topAnchor.constraint(equalTo: header.topAnchor, constant: 26),
+            titles.bottomAnchor.constraint(equalTo: header.bottomAnchor, constant: -16),
+            saved.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -Theme.contentPadding),
+            saved.bottomAnchor.constraint(equalTo: titles.bottomAnchor, constant: -1),
 
             pageScroll.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
             pageScroll.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
-            pageScroll.topAnchor.constraint(equalTo: banner.bottomAnchor, constant: 8),
-            pageScroll.bottomAnchor.constraint(equalTo: toast.topAnchor, constant: -6),
-
+            pageScroll.topAnchor.constraint(equalTo: header.bottomAnchor),
+            pageScroll.bottomAnchor.constraint(equalTo: detail.bottomAnchor),
             pageStack.widthAnchor.constraint(equalTo: pageScroll.widthAnchor, constant: -(Theme.contentPadding * 2)),
-
-            toast.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: Theme.contentPadding),
-            toast.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -Theme.contentPadding),
-            toast.bottomAnchor.constraint(equalTo: detail.bottomAnchor, constant: -12),
-            toast.heightAnchor.constraint(equalToConstant: 16)
         ])
         return detail
     }
 
-    private func setupBannerView() -> NSView {
-        let banner = NSView()
-        banner.translatesAutoresizingMaskIntoConstraints = false
-        banner.wantsLayer = true
-        banner.layer?.cornerRadius = 10
-        banner.layer?.backgroundColor = Theme.warnColor.withAlphaComponent(0.13).cgColor
-        banner.layer?.borderWidth = 1
-        banner.layer?.borderColor = Theme.warnColor.withAlphaComponent(0.35).cgColor
-
-        let icon = NSImageView()
-        if let image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Setup incomplete") {
-            icon.image = image
-            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-            icon.contentTintColor = Theme.warnColor
-        }
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-
-        let text = label("", font: Theme.bodyFont, color: .labelColor)
-        text.maximumNumberOfLines = 2
-        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        bannerLabel = text
-
-        let button = NSButton(title: "Fix", target: self, action: #selector(bannerActionTapped))
-        styleInlineButton(button)
-        button.setContentHuggingPriority(.required, for: .horizontal)
-        bannerButton = button
-
-        let row = NSStackView(views: [icon, text, button])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 10
-        row.distribution = .fill
-        row.translatesAutoresizingMaskIntoConstraints = false
-        banner.addSubview(row)
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 12),
-            row.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -12),
-            row.topAnchor.constraint(equalTo: banner.topAnchor, constant: 9),
-            row.bottomAnchor.constraint(equalTo: banner.bottomAnchor, constant: -9)
-        ])
-        banner.isHidden = true
-        bannerView = banner
-        return banner
-    }
-
-    @objc private func bannerActionTapped() {
+    private func bannerActionTapped() {
         showSection(bannerTarget, animated: true)
         if bannerTarget == .model {
             window?.makeFirstResponder(primaryConnectionField)
@@ -700,19 +828,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     // MARK: Section switching
 
-    func showSection(_ section: Section, animated: Bool) {
+    func showSection(_ section: Section, animated: Bool, force: Bool = false) {
         stopHotkeyCapture()
         currentSection = section
-        updateSidebarSelection(section)
+        for (item, button) in sectionButtons {
+            button.isSelectedItem = item == section
+        }
         updateBanner()
-        detailTitleLabel?.stringValue = section.title
-        detailSubtitleLabel?.stringValue = section.subtitle
+        detailTitleLabel.stringValue = section.title
+        detailSubtitleLabel.stringValue = section.subtitle
 
-        guard let pageStack = detailPageStack else { return }
         let nextPage = pageView(for: section)
-        let previous = pageStack.arrangedSubviews.first
-        if previous === nextPage { return }
-
+        let previous = pageStack.arrangedSubviews.count > 1 ? pageStack.arrangedSubviews[1] : nil
+        if previous === nextPage, !force { return }
         if let previous {
             pageStack.removeArrangedSubview(previous)
             previous.removeFromSuperview()
@@ -736,103 +864,142 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let page = NSStackView()
         page.orientation = .vertical
         page.alignment = .leading
-        page.spacing = Theme.sectionSpacing
+        page.spacing = 20
+        page.translatesAutoresizingMaskIntoConstraints = false
+        let groups: [NSView]
         switch section {
         case .general:
-            page.addArrangedSubview(contentCard(shortcutCard()))
-            page.addArrangedSubview(contentCard(startupCard()))
-            page.addArrangedSubview(contentCard(translationCard()))
-            page.addArrangedSubview(contentCard(voiceCard()))
+            groups = [
+                group("Palette shortcut", card([shortcutRow()])),
+                group("Behavior", card([loginRow(), languageRow(), voiceRow()])),
+            ]
         case .model:
-            page.addArrangedSubview(contentCard(modelCard()))
+            groups = modelGroups()
         case .actions:
-            page.addArrangedSubview(actionsSectionView())
+            groups = [actionsGroup()]
         case .permissions:
-            page.addArrangedSubview(contentCard(permissionsSectionView()))
+            groups = permissionsGroups()
         }
-        for card in page.arrangedSubviews {
-            card.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
+        for item in groups {
+            page.addArrangedSubview(item)
+            item.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
         }
         sectionPages[section] = page
         return page
     }
 
-    private func updateSidebarSelection(_ section: Section) {
-        for (item, button) in sectionButtons {
-            let selected = (item == section)
-            button.layer?.backgroundColor = selected ? Theme.sidebarSelection.cgColor : NSColor.clear.cgColor
-            button.contentTintColor = selected ? .labelColor : .secondaryLabelColor
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .medium),
-                .foregroundColor: selected ? NSColor.labelColor : NSColor.secondaryLabelColor
-            ]
-            button.attributedTitle = NSAttributedString(string: item.title, attributes: attrs)
-        }
-    }
-
     // MARK: Status surfaces
 
     private func updateBanner() {
-        guard let bannerView, let bannerLabel, let bannerButton else { return }
         guard let status, let headline = status.headline else {
-            bannerView.isHidden = true
+            banner.isHidden = true
             return
         }
-        bannerView.isHidden = false
+        banner.isHidden = false
         bannerLabel.stringValue = headline
         if !status.permissionsGranted {
             bannerTarget = .permissions
-            bannerButton.title = "Open Permissions"
+            bannerButton.text = "Fix in Permissions"
         } else if !status.connectionConfigured {
             bannerTarget = .model
-            bannerButton.title = "Set Up AI Model"
+            bannerButton.text = "Set Up AI Model"
         } else {
             bannerTarget = .general
-            bannerButton.title = "Change Shortcut"
+            bannerButton.text = "Change Shortcut"
         }
         bannerButton.isHidden = currentSection == bannerTarget
     }
 
     private func updateBadges() {
         guard let status else { return }
-        sectionBadges[.general]?.isHidden = status.hotkeyRegistered
-        sectionBadges[.model]?.isHidden = status.connectionConfigured
-        sectionBadges[.permissions]?.isHidden = status.permissionsGranted
-        sectionBadges[.actions]?.isHidden = true
+        sectionButtons[.general]?.badge = status.hotkeyRegistered ? nil : "!"
+        sectionButtons[.model]?.badge = status.connectionConfigured ? nil : "!"
+        sectionButtons[.permissions]?.badge = status.permissionsGranted ? nil : "\(status.missingPermissionCount)"
+        sectionButtons[.actions]?.badge = nil
+    }
+
+    private func updateSidebarStatus() {
+        guard let status else { return }
+        if status.isReady {
+            statusDotView?.color = Lantor.success
+            statusDotView?.halo = Lantor.successSoft
+            statusTitle.stringValue = "Ready"
+            statusDetail.stringValue = "Press \(shortcut.display) in any app to open the palette."
+        } else {
+            statusDotView?.color = Lantor.warning
+            statusDotView?.halo = Lantor.warningSoft
+            statusTitle.stringValue = "Setup incomplete"
+            if !status.permissionsGranted, !status.accessibility {
+                statusDetail.stringValue = "Accessibility access is off — Jit can't read or replace the selection."
+            } else {
+                statusDetail.stringValue = status.headline ?? ""
+            }
+        }
     }
 
     private func updateShortcutStatus() {
-        guard let shortcutButton, let shortcutStatusLabel else { return }
+        guard let shortcutChip, let shortcutDetail else { return }
+        rebuildShortcutKeys()
         if hotkeyCaptureMonitor != nil {
-            shortcutButton.title = "Type new shortcut…"
-            shortcutButton.contentTintColor = .controlAccentColor
+            shortcutButton?.text = "Cancel"
             let fallback = ShortcutDraft(feature: AppConfig.defaults.features.first(where: { $0.id == "custom" }) ?? AppConfig.defaults.features[0])
-            shortcutStatusLabel.stringValue = "Listening — Esc cancels, ⌫ restores \(fallback.display)"
-            shortcutStatusLabel.textColor = .secondaryLabelColor
+            shortcutChip.text = "Listening"
+            shortcutChip.tone = .thinking
+            shortcutChip.pulse = true
+            shortcutDetail.stringValue = "Press the new shortcut. Esc cancels, ⌫ restores \(fallback.display)."
+            shortcutDetail.textColor = Lantor.muted
             return
         }
-        shortcutButton.title = shortcut.display
-        shortcutButton.contentTintColor = nil
+        shortcutButton?.text = "Record new…"
+        shortcutChip.pulse = false
         guard let status else {
-            shortcutStatusLabel.stringValue = ""
+            shortcutChip.isHidden = true
             return
         }
+        shortcutChip.isHidden = false
         if status.hotkeyRegistered {
-            shortcutStatusLabel.stringValue = "Active — press it in any app to open the palette."
-            shortcutStatusLabel.textColor = Theme.okColor
+            shortcutChip.text = "Active"
+            shortcutChip.tone = .success
+            shortcutDetail.stringValue = "Translate, Polish, Custom and Words share this one shortcut."
+            shortcutDetail.textColor = Lantor.muted
         } else {
-            shortcutStatusLabel.stringValue = status.hotkeyProblem ?? "Not registered."
-            shortcutStatusLabel.textColor = Theme.errorColor
+            shortcutChip.text = "Not registered"
+            shortcutChip.tone = .danger
+            shortcutDetail.stringValue = status.hotkeyProblem ?? "Not registered."
+            shortcutDetail.textColor = Lantor.danger
+        }
+    }
+
+    private func rebuildShortcutKeys() {
+        guard let shortcutKeys else { return }
+        shortcutKeys.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let listening = hotkeyCaptureMonitor != nil
+        for part in listening ? ["…"] : shortcut.parts {
+            let key = LantorKey(part, large: true)
+            key.highlighted = listening
+            shortcutKeys.addArrangedSubview(key)
         }
     }
 
     private func showToast(_ message: String, kind: FeedbackKind = .neutral) {
-        guard let toastLabel else { return }
         toastWorkItem?.cancel()
-        toastLabel.stringValue = message
-        toastLabel.textColor = kind.color
-        let work = DispatchWorkItem { [weak toastLabel] in
-            toastLabel?.stringValue = ""
+        savedLabel.stringValue = message
+        switch kind {
+        case .neutral:
+            savedLabel.textColor = Lantor.muted
+            savedIcon.image = Lantor.symbol("info.circle", size: 11, weight: .semibold, color: Lantor.muted)
+        case .success:
+            savedLabel.textColor = Lantor.success
+            savedIcon.image = Lantor.symbol("checkmark", size: 11, weight: .bold, color: Lantor.success)
+        case .error:
+            savedLabel.textColor = Lantor.danger
+            savedIcon.image = Lantor.symbol("exclamationmark.circle", size: 11, weight: .semibold, color: Lantor.danger)
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.savedLabel.stringValue = "Saved automatically"
+            self.savedLabel.textColor = Lantor.muted
+            self.savedIcon.image = Lantor.symbol("checkmark", size: 11, weight: .bold, color: Lantor.success)
         }
         toastWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
@@ -840,92 +1007,117 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     // MARK: General
 
-    private func shortcutCard() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 12
-        stack.alignment = .leading
-        stack.addArrangedSubview(sectionHeader(
-            title: "Action Palette Shortcut",
-            subtitle: "One global shortcut opens the palette for Translate, Refine, Vocabulary, or Custom."
-        ))
+    private func shortcutRow() -> NSView {
+        let keys = NSStackView()
+        keys.orientation = .horizontal
+        keys.spacing = 6
+        keys.alignment = .centerY
+        shortcutKeys = keys
 
-        let button = NSButton(title: shortcut.display, target: self, action: #selector(recordShortcutTapped))
-        button.bezelStyle = .rounded
-        button.controlSize = .large
-        button.font = Theme.monoFont
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        let title = Lantor.label("Opens the palette in any app", Lantor.font(14, .semibold), Lantor.ink)
+        let chip = LantorChip("Active", tone: .success, dot: true)
+        shortcutChip = chip
+        let titleRow = NSStackView(views: [title, chip])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 8
+        let detail = Lantor.label("", Lantor.font(12), Lantor.muted, lines: 2)
+        shortcutDetail = detail
+        let copy = NSStackView(views: [titleRow, detail])
+        copy.orientation = .vertical
+        copy.alignment = .leading
+        copy.spacing = 3
+        copy.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let button = LantorButton("Record new…", kind: .secondary)
         button.toolTip = "Click, then press the new shortcut"
+        button.onClick = { [weak self] in self?.recordShortcutTapped() }
         shortcutButton = button
 
-        let statusLabel = label("", font: Theme.captionFont, color: .secondaryLabelColor)
-        statusLabel.maximumNumberOfLines = 2
-        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        shortcutStatusLabel = statusLabel
-
-        let row = NSStackView(views: [button, statusLabel])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let row = NSStackView(views: [keys, copy, spacer, button])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 12
-        stack.addArrangedSubview(formRow("Shortcut", control: row))
+        row.spacing = 14
+        row.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         updateShortcutStatus()
-        return stack
+        return row
     }
 
-    private func startupCard() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 10
-        stack.alignment = .leading
-        stack.addArrangedSubview(sectionHeader(title: "Startup", subtitle: "Jit lives in the menu bar; it has no Dock icon."))
-
+    private func loginRow() -> NSView {
         let info = loginItemInfo?() ?? (enabled: false, text: "")
-        let checkbox = NSButton(checkboxWithTitle: "Launch Jit at login", target: self, action: #selector(toggleLoginItemTapped))
-        checkbox.state = info.enabled ? .on : .off
-        checkbox.font = Theme.bodyFont
-        loginItemCheckbox = checkbox
-        let statusLabel = label(info.text, font: Theme.captionFont, color: .secondaryLabelColor)
-        loginItemStatusLabel = statusLabel
-        stack.addArrangedSubview(checkbox)
-        stack.addArrangedSubview(statusLabel)
-        return stack
+        let toggle = NSSwitch()
+        toggle.state = info.enabled ? .on : .off
+        toggle.target = self
+        toggle.action = #selector(toggleLoginItemTapped)
+        loginSwitch = toggle
+        let (row, subtitle) = toggleRow(symbol: "power", title: "Launch at login", subtitle: loginSubtitle(info.text), accessory: toggle)
+        loginDetail = subtitle
+        return row
     }
 
-    private func translationCard() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 10
-        stack.alignment = .leading
-        stack.addArrangedSubview(sectionHeader(
-            title: "Translation",
-            subtitle: "Text already in the target language is translated to English instead."
-        ))
-        stack.addArrangedSubview(formRow("Target Language", control: fieldContainer(for: targetLanguageField, minWidth: 260)))
-        return stack
+    private func loginSubtitle(_ status: String) -> String {
+        status.localizedCaseInsensitiveContains("approval")
+            ? "Waiting for approval in System Settings → General → Login Items."
+            : "Jit lives in the menu bar and has no Dock icon."
     }
 
-    private func voiceCard() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 10
-        stack.alignment = .leading
-        let info = voiceInfo?() ?? (description: "System default", highQuality: true)
-        stack.addArrangedSubview(sectionHeader(title: "Pronunciation Voice", subtitle: "Used by Vocabulary to read words aloud."))
-        let voiceLabel = label(info.description, font: Theme.bodyFont, color: .labelColor)
-        if info.highQuality {
-            stack.addArrangedSubview(formRow("Voice", control: voiceLabel))
-        } else {
-            let download = NSButton(title: "Download Better Voices…", target: self, action: #selector(openVoiceSettingsTapped))
-            styleInlineButton(download)
-            let hint = label("Only a compact voice is installed. Enhanced voices sound much better.", font: Theme.captionFont, color: Theme.warnColor)
-            let row = NSStackView(views: [voiceLabel, download])
-            row.orientation = .horizontal
-            row.spacing = 10
-            row.alignment = .centerY
-            stack.addArrangedSubview(formRow("Voice", control: row))
-            stack.addArrangedSubview(hint)
+    private func languageRow() -> NSView {
+        let popup = NSPopUpButton()
+        popup.target = self
+        popup.action = #selector(languageChanged(_:))
+        var names = TranslationLanguage.all.map(\.name)
+        let current = targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !current.isEmpty, !names.contains(where: { $0.caseInsensitiveCompare(current) == .orderedSame }) {
+            names.append(current)
         }
-        return stack
+        for name in names {
+            popup.addItem(withTitle: TranslationLanguage.nativeName(for: name))
+            popup.lastItem?.representedObject = name
+        }
+        if let index = names.firstIndex(where: { $0.caseInsensitiveCompare(current) == .orderedSame }) {
+            popup.selectItem(at: index)
+        }
+        return toggleRow(
+            symbol: "character.bubble", title: "Translate into",
+            subtitle: "Text already in this language is translated to English.", accessory: popup
+        ).row
+    }
+
+    @objc private func languageChanged(_ sender: NSPopUpButton) {
+        guard let name = sender.selectedItem?.representedObject as? String else { return }
+        targetLanguage = name
+        commit(toast: "Translate into \(TranslationLanguage.nativeName(for: name)).")
+    }
+
+    private func voiceRow() -> NSView {
+        let popup = NSPopUpButton()
+        popup.target = self
+        popup.action = #selector(voiceChanged(_:))
+        popup.addItem(withTitle: "Automatic (best installed)")
+        popup.lastItem?.representedObject = nil
+        let selected = selectedVoiceID?()
+        for option in voiceOptions?() ?? [] {
+            popup.addItem(withTitle: option.name)
+            popup.lastItem?.representedObject = option.id
+            if option.id == selected { popup.select(popup.lastItem) }
+        }
+        let info = voiceInfo?() ?? (description: "System default", highQuality: true)
+        let subtitle = NSMutableAttributedString(string: "Used by Words. ", attributes: [.font: Lantor.font(12), .foregroundColor: Lantor.muted])
+        if !info.highQuality {
+            subtitle.append(NSAttributedString(string: "Only a compact voice is installed. ", attributes: [.font: Lantor.font(12), .foregroundColor: Lantor.warning]))
+        }
+        let link = LantorLinkButton("Download better voices…") { [weak self] in self?.onOpenVoiceSettings?() }
+        let (row, subtitleLabel) = toggleRow(symbol: "speaker.wave.2", title: "Pronunciation voice", subtitle: "", accessory: popup, subtitleAccessory: link)
+        subtitleLabel.attributedStringValue = subtitle
+        return row
+    }
+
+    @objc private func voiceChanged(_ sender: NSPopUpButton) {
+        let id = sender.selectedItem?.representedObject as? String
+        onSelectVoice?(id)
+        showToast(id == nil ? "Voice: automatic." : "Voice: \(sender.titleOfSelectedItem ?? "")", kind: .success)
     }
 
     @objc private func toggleLoginItemTapped() {
@@ -933,17 +1125,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             showToast(error, kind: .error)
         }
         let info = loginItemInfo?() ?? (enabled: false, text: "")
-        loginItemCheckbox?.state = info.enabled ? .on : .off
-        loginItemStatusLabel?.stringValue = info.text
-    }
-
-    @objc private func openVoiceSettingsTapped() {
-        onOpenVoiceSettings?()
+        loginSwitch?.state = info.enabled ? .on : .off
+        loginDetail?.stringValue = loginSubtitle(info.text)
     }
 
     // MARK: Shortcut recording
 
-    @objc private func recordShortcutTapped() {
+    private func recordShortcutTapped() {
         if hotkeyCaptureMonitor != nil {
             stopHotkeyCapture()
             return
@@ -964,8 +1152,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         updateShortcutStatus()
     }
 
+    private func captureError(_ message: String) {
+        shortcutDetail?.stringValue = message
+        shortcutDetail?.textColor = Lantor.danger
+        NSSound.beep()
+    }
+
     private func handleHotkeyCapture(_ event: NSEvent) -> NSEvent? {
-        guard let shortcutStatusLabel else { return event }
         switch event.keyCode {
         case 53: // Esc
             stopHotkeyCapture()
@@ -980,9 +1173,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             break
         }
         guard let key = KeyCodeMapper.shared.key(for: UInt32(event.keyCode)) else {
-            shortcutStatusLabel.stringValue = "Use a letter or number key."
-            shortcutStatusLabel.textColor = Theme.errorColor
-            NSSound.beep()
+            captureError("Use a letter or number key.")
             return nil
         }
         let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
@@ -994,15 +1185,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             shift: flags.contains(.shift)
         )
         guard candidate.hasModifier else {
-            shortcutStatusLabel.stringValue = "Add at least one modifier (⌘ ⌥ ⌃ ⇧)."
-            shortcutStatusLabel.textColor = Theme.errorColor
-            NSSound.beep()
+            captureError("Add at least one modifier (⌘ ⌥ ⌃ ⇧).")
             return nil
         }
         if flags == [.shift] {
-            shortcutStatusLabel.stringValue = "Shift alone would block typing capital letters; add ⌘, ⌥, or ⌃."
-            shortcutStatusLabel.textColor = Theme.errorColor
-            NSSound.beep()
+            captureError("Shift alone would block typing capital letters; add ⌘, ⌥, or ⌃.")
             return nil
         }
         let changed = candidate != shortcut
@@ -1016,98 +1203,105 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     // MARK: AI Model
 
-    private func modelCard() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 12
-        stack.alignment = .leading
-        stack.addArrangedSubview(sectionHeader(
-            title: "Connection",
-            subtitle: "Use your local Codex or Claude Code login, or an API connection. Changes are saved as you go."
-        ))
-        backendPicker.removeAllItems()
-        backendPicker.addItems(withTitles: Self.backendChoices.map(\.title))
-        backendPicker.selectItem(at: Self.backendChoices.firstIndex(where: { $0.backend == backend }) ?? 0)
-        backendPicker.target = self
-        backendPicker.action = #selector(backendChanged)
-        stack.addArrangedSubview(formRow("Use", control: backendPicker))
-        if let cli = cliFields {
-            let name = cli.tool.displayName
-            stack.addArrangedSubview(formRow("", control: label(
-                "Uses your saved \(name) login. No API key is needed in Jit.",
-                font: Theme.captionFont, color: .secondaryLabelColor
-            )))
-            stack.addArrangedSubview(formRow("\(cli.tool.executableName.capitalized) path", control: fieldContainer(for: cli.path, minWidth: 420)))
-            let location = label("", font: Theme.captionFont, color: .secondaryLabelColor)
-            cliLocationLabel = location
-            updateCLILocation()
-            stack.addArrangedSubview(formRow("", control: location))
-            stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: cli.model, minWidth: 300)))
-            stack.addArrangedSubview(formRow("", control: label(
-                "Optional. Leave blank to use \(name)'s default model.",
-                font: Theme.captionFont, color: .secondaryLabelColor
-            )))
-        } else {
-            stack.addArrangedSubview(formRow("Base URL", control: fieldContainer(for: baseURLField, minWidth: 460)))
-            stack.addArrangedSubview(apiKeyRow())
-            stack.addArrangedSubview(formRow("Model", control: fieldContainer(for: modelField, minWidth: 300)))
+    private static let backendChoices: [(backend: AIBackend, symbol: String, title: String, detail: String)] = [
+        (.codexCLI, "terminal", "Codex CLI", "Uses your saved Codex login. No API key."),
+        (.claudeCLI, "asterisk", "Claude Code", "Uses your saved Claude Code login."),
+        (.chatAPI, "link", "OpenAI-compatible", "Base URL, API key and model."),
+    ]
+
+    private func modelGroups() -> [NSView] {
+        let choices = NSStackView()
+        choices.orientation = .horizontal
+        choices.distribution = .fillEqually
+        choices.spacing = 8
+        for choice in Self.backendChoices {
+            let card = ChoiceCard(symbol: choice.symbol, title: choice.title, detail: choice.detail)
+            card.isSelected = choice.backend == backend
+            card.onClick = { [weak self] in self?.selectBackend(choice.backend) }
+            choices.addArrangedSubview(card)
         }
 
-        let button = NSButton(title: "Test Connection", target: self, action: #selector(testTapped))
-        styleSecondaryButton(button)
-        button.setContentHuggingPriority(.required, for: .horizontal)
-        testButton = button
+        var rows: [NSView] = []
+        let title: String
+        if let cli = cliFields {
+            title = cli.tool == .codex ? "Codex CLI" : "Claude Code"
+            let icon = NSImageView()
+            icon.setContentHuggingPriority(.required, for: .horizontal)
+            cliLocationIcon = icon
+            let location = Lantor.label("", Lantor.font(12, .medium), Lantor.success)
+            location.lineBreakMode = .byTruncatingMiddle
+            location.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            cliLocationLabel = location
+            let locationRow = NSStackView(views: [icon, location])
+            locationRow.orientation = .horizontal
+            locationRow.alignment = .firstBaseline
+            locationRow.spacing = 5
+            updateCLILocation()
+            rows.append(formRow("Executable", control: LantorFieldBox(cli.path), help: locationRow))
+            let modelHelp = Lantor.label("Optional. Leave blank to use \(cli.tool.displayName)'s default model.", Lantor.font(12), Lantor.muted)
+            rows.append(formRow("Model", control: LantorFieldBox(cli.model), help: modelHelp))
+        } else {
+            title = "OpenAI-compatible API"
+            rows.append(formRow("Base URL", control: LantorFieldBox(baseURLField)))
+            let paste = LantorButton("Paste", kind: .secondary)
+            paste.onClick = { [weak self] in self?.pasteAPIKey() }
+            let keyRow = NSStackView(views: [LantorFieldBox(apiKeyField), paste])
+            keyRow.orientation = .horizontal
+            keyRow.alignment = .centerY
+            keyRow.spacing = 8
+            rows.append(formRow("API key", control: keyRow))
+            rows.append(formRow("Model", control: LantorFieldBox(modelField)))
+        }
 
+        // Check
         let spinner = NSProgressIndicator()
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-        spinner.translatesAutoresizingMaskIntoConstraints = false
-        spinner.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        spinner.heightAnchor.constraint(equalToConstant: 16).isActive = true
         testSpinner = spinner
+        let chip = LantorChip("", tone: .success, dot: true)
+        chip.maxTextWidth = 260
+        chip.isHidden = true
+        testChip = chip
+        let button = LantorButton("Run test", kind: .secondary)
+        button.onClick = { [weak self] in self?.testTapped() }
+        testButton = button
+        let accessory = NSStackView(views: [spinner, chip, button])
+        accessory.orientation = .horizontal
+        accessory.alignment = .centerY
+        accessory.spacing = 8
+        let (testRow, _) = toggleRow(symbol: "bolt", title: "Test connection", subtitle: "Sends one short Translate request.", accessory: accessory)
+        let error = Lantor.label("", Lantor.font(12), Lantor.danger, lines: 4)
+        error.isHidden = true
+        testErrorLabel = error
+        let errorRow = NSStackView(views: [error])
+        errorRow.edgeInsets = NSEdgeInsets(top: 0, left: 56, bottom: 12, right: 16)
+        let checkStack = NSStackView(views: [testRow, errorRow])
+        checkStack.orientation = .vertical
+        checkStack.alignment = .leading
+        checkStack.spacing = 0
+        testRow.widthAnchor.constraint(equalTo: checkStack.widthAnchor).isActive = true
+        errorRow.widthAnchor.constraint(equalTo: checkStack.widthAnchor).isActive = true
+        error.preferredMaxLayoutWidth = 520
 
-        let result = label("", font: Theme.captionFont, color: .secondaryLabelColor)
-        result.maximumNumberOfLines = 3
-        result.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        testResultLabel = result
-
-        let row = NSStackView(views: [button, spinner, result])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        stack.addArrangedSubview(formRow("", control: row))
-        return stack
+        return [
+            group("Connection", choices),
+            group(title, card(rows)),
+            group("Check", card([checkStack])),
+        ]
     }
 
-    private static let backendChoices: [(backend: AIBackend, title: String)] = [
-        (.codexCLI, "Local Codex CLI"),
-        (.claudeCLI, "Local Claude Code CLI"),
-        (.chatAPI, "OpenAI-compatible API"),
-    ]
-
-    @objc private func backendChanged() {
+    private func selectBackend(_ newBackend: AIBackend) {
+        guard newBackend != backend else { return }
         window?.makeFirstResponder(nil)
         invalidateConnectionTest()
-        let index = backendPicker.indexOfSelectedItem
-        backend = Self.backendChoices.indices.contains(index) ? Self.backendChoices[index].backend : .chatAPI
+        backend = newBackend
         commit(toast: "AI connection changed.")
         sectionPages[.model] = nil
-        showSection(.model, animated: false)
+        showSection(.model, animated: false, force: true)
     }
 
-    private func apiKeyRow() -> NSView {
-        let pasteButton = NSButton(title: "Paste", target: self, action: #selector(pasteAPIKey))
-        styleInlineButton(pasteButton)
-        pasteButton.widthAnchor.constraint(equalToConstant: 72).isActive = true
-        let row = NSStackView(views: [fieldContainer(for: apiKeyField, minWidth: 380), pasteButton])
-        row.orientation = .horizontal
-        row.spacing = 8
-        row.alignment = .centerY
-        return formRow("API Key", control: row)
-    }
-
-    @objc private func pasteAPIKey() {
+    private func pasteAPIKey() {
         guard let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty else {
             showToast("Clipboard has no text to paste.", kind: .error)
@@ -1118,11 +1312,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         commit(toast: "API key pasted and saved.")
     }
 
-    @objc private func testTapped() {
+    private func testTapped() {
         window?.makeFirstResponder(nil)
         let config = draftConfig()
         guard config.hasRequiredConnectionSettings else {
-            setTestResult(config.connectionSetupMessage, kind: .error)
+            setTestResult(chip: "Not set up", tone: .warning, error: config.connectionSetupMessage)
             return
         }
         guard let feature = config.features.first(where: { $0.id == "translate" }) else { return }
@@ -1131,79 +1325,62 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let generation = connectionTestGeneration
         testButton?.isEnabled = false
         testSpinner?.startAnimation(nil)
-        setTestResult("Sending a test request…", kind: .neutral)
+        setTestResult(chip: "Sending…", tone: .thinking, error: nil)
         let started = Date()
         onTest?(config, feature) { [weak self] result in
             guard let self, self.connectionTestGeneration == generation else { return }
             self.testButton?.isEnabled = true
             self.testSpinner?.stopAnimation(nil)
-            let elapsed = String(format: "%.1fs", Date().timeIntervalSince(started))
+            let elapsed = CommandInputWindowController.formatElapsed(Date().timeIntervalSince(started))
             switch result {
             case .success:
-                self.setTestResult("Connected · \(config.connectionModelName) · \(elapsed)", kind: .success)
+                self.setTestResult(chip: "Connected · \(config.connectionModelName) · \(elapsed)", tone: .success, error: nil)
             case .failure(let error):
-                self.setTestResult("Failed: \(FriendlyError.describe(error).message)", kind: .error)
+                self.setTestResult(chip: "Failed", tone: .danger, error: FriendlyError.describe(error).message)
             }
         }
     }
 
-    private func setTestResult(_ message: String, kind: FeedbackKind) {
-        testResultLabel?.stringValue = message
-        testResultLabel?.textColor = kind.color
+    private func setTestResult(chip text: String, tone: LantorChip.Tone, error: String?) {
+        testChip?.isHidden = false
+        testChip?.text = text
+        testChip?.tone = tone
+        testChip?.pulse = tone == .thinking
+        testErrorLabel?.stringValue = error ?? ""
+        testErrorLabel?.isHidden = error == nil
     }
 
     // MARK: Actions
 
-    private func actionsSectionView() -> NSView {
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.spacing = 10
-        container.alignment = .leading
-        container.addArrangedSubview(sectionHeader(
-            title: "Prompts",
-            subtitle: "Placeholders: {{text}} selected text · {{instruction}} your input · {{targetLanguage}}"
-        ))
-
-        for feature in featureConfigs {
-            let title = label(feature.displayName, font: NSFont.systemFont(ofSize: 14, weight: .semibold), color: .labelColor)
-            let subtitle = label(promptSubtitle(for: feature.id), font: Theme.captionFont, color: .secondaryLabelColor)
-            let preview = label(promptPreview(for: feature), font: Theme.captionFont, color: .tertiaryLabelColor)
-            preview.maximumNumberOfLines = 1
-            preview.lineBreakMode = .byTruncatingTail
-            preview.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let titleStack = NSStackView(views: [title, subtitle, preview])
-            titleStack.orientation = .vertical
-            titleStack.spacing = 3
-            titleStack.alignment = .leading
-            titleStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
+    private func actionsGroup() -> NSView {
+        let order = ["translate", "refine", "custom", "vocabulary"]
+        let features = featureConfigs.sorted { (order.firstIndex(of: $0.id) ?? 99) < (order.firstIndex(of: $1.id) ?? 99) }
+        var rows: [NSView] = []
+        for feature in features {
             let isDefault = feature.promptTemplate == AppConfig.defaultPromptTemplate(for: feature.id)
-            let chip = statusChip(text: isDefault ? "Default" : "Customized", tone: isDefault ? .neutral : .accent)
-
-            let editPrompt = NSButton(title: "Edit…", target: self, action: #selector(editFeaturePromptTapped(_:)))
-            editPrompt.identifier = NSUserInterfaceItemIdentifier(feature.id)
-            styleInlineButton(editPrompt)
-            editPrompt.setContentHuggingPriority(.required, for: .horizontal)
-
-            let spacer = NSView()
-            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let row = NSStackView(views: [titleStack, spacer, chip, editPrompt])
-            row.orientation = .horizontal
-            row.distribution = .fill
-            row.alignment = .centerY
-            row.spacing = 10
-            let styled = styledRow(row)
-            container.addArrangedSubview(styled)
-            styled.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
-            row.widthAnchor.constraint(equalTo: styled.widthAnchor, constant: -22).isActive = true
+            let chip = LantorChip(isDefault ? "Default" : "Customized", tone: isDefault ? .neutral : .accent)
+            let edit = LantorButton("Edit…", kind: .secondary)
+            edit.height = 28
+            edit.onClick = { [weak self] in self?.editFeaturePrompt(feature.id) }
+            let accessory = NSStackView(views: [chip, edit])
+            accessory.orientation = .horizontal
+            accessory.alignment = .centerY
+            accessory.spacing = 8
+            let symbol = CommandInputWindowController.symbol(for: .init(id: feature.id, title: feature.displayName, requiresInstruction: false, supportsReplace: false, promptPreview: ""))
+            let (row, _) = toggleRow(symbol: symbol, title: feature.displayName, subtitle: "\(promptSubtitle(for: feature.id)) · \(promptPreview(for: feature))", accessory: accessory)
+            rows.append(row)
         }
-        return container
+        let help = helpLabel("Placeholders: {{text}} selected text · {{instruction}} your input · {{targetLanguage}} target language.")
+        let stack = NSStackView(views: [help, card(rows)])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        for view in stack.arrangedSubviews { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        return group("Prompts", stack)
     }
 
-    @objc private func editFeaturePromptTapped(_ sender: NSButton) {
-        guard let id = sender.identifier?.rawValue,
-              let feature = featureConfigs.first(where: { $0.id == id }),
-              let window else { return }
+    private func editFeaturePrompt(_ id: String) {
+        guard let feature = featureConfigs.first(where: { $0.id == id }), let window else { return }
         let editor = PromptEditorWindowController(
             currentTemplate: feature.promptTemplate,
             defaultTemplate: AppConfig.defaultPromptTemplate(for: feature.id)
@@ -1212,7 +1389,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             guard let self, let index = self.featureConfigs.firstIndex(where: { $0.id == feature.id }) else { return }
             self.featureConfigs[index].promptTemplate = newTemplate
             self.sectionPages[.actions] = nil
-            self.showSection(.actions, animated: false)
+            self.showSection(.actions, animated: false, force: true)
             self.commit(toast: "\(feature.displayName) prompt saved.")
         }
         promptEditor = editor
@@ -1226,8 +1403,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         switch featureID {
         case "translate": return "Direct translation"
         case "refine": return "Rewrite and polish"
-        case "custom": return "Runs your typed instruction on the selection"
-        case "vocabulary": return "English word study with pronunciation"
+        case "custom": return "Runs your typed instruction"
+        case "vocabulary": return "Word card with pronunciation"
         default: return "Custom prompt template"
         }
     }
@@ -1242,114 +1419,67 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     // MARK: Permissions
 
-    private func permissionsSectionView() -> NSView {
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.spacing = 10
-        container.alignment = .leading
-        container.addArrangedSubview(sectionHeader(
-            title: "System Permissions",
-            subtitle: "Status refreshes automatically when you come back from System Settings."
-        ))
-
+    private func permissionsGroups() -> [NSView] {
         let current = status ?? statusProvider?()
-        let rows: [(String, Bool, String, Selector)] = [
-            ("Accessibility", current?.accessibility ?? AXIsProcessTrusted(),
+        let rows: [(String, String, Bool, String, Selector)] = [
+            ("Accessibility", "accessibility", current?.accessibility ?? AXIsProcessTrusted(),
              "Reads the selected text and positions the palette next to it.", #selector(openAccessibilitySettingsTapped)),
-            ("Input Monitoring", current?.inputMonitoring ?? CGPreflightListenEventAccess(),
+            ("Input Monitoring", "keyboard", current?.inputMonitoring ?? CGPreflightListenEventAccess(),
              "Lets the global shortcut work while other apps are focused.", #selector(openInputMonitoringSettingsTapped)),
-            ("Post Events", current?.postEvents ?? CGPreflightPostEventAccess(),
-             "Pastes results back with Replace and copies selections as a fallback.", #selector(openPrivacySecuritySettingsTapped))
+            ("Post Events", "cursorarrow.click", current?.postEvents ?? CGPreflightPostEventAccess(),
+             "Pastes results back with Replace and copies selections as a fallback.", #selector(openPrivacySecuritySettingsTapped)),
         ]
-        for (title, allowed, detail, selector) in rows {
-            let row = permissionStatusRow(title: title, allowed: allowed, detail: detail, actionSelector: selector)
-            container.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+        var cardRows: [NSView] = []
+        for (title, symbol, allowed, detail, selector) in rows {
+            let chip = LantorChip(allowed ? "Allowed" : "Not allowed", tone: allowed ? .success : .warning, dot: true)
+            var views: [NSView] = [chip]
+            if !allowed {
+                let open = LantorButton("Open Settings", kind: .secondary)
+                open.height = 28
+                open.onClick = { [weak self] in _ = self?.perform(selector) }
+                views.append(open)
+            }
+            let accessory = NSStackView(views: views)
+            accessory.orientation = .horizontal
+            accessory.alignment = .centerY
+            accessory.spacing = 8
+            cardRows.append(toggleRow(symbol: symbol, title: title, subtitle: detail, accessory: accessory).row)
         }
 
-        let allGranted = rows.allSatisfy { $0.1 }
-        let guide = label(
-            allGranted
-                ? "All set. If a permission stops working after an update, use Reset and grant it again."
-                : "Click Grant Access to trigger the system prompts, enable Jit in System Settings, then come back here.",
-            font: Theme.captionFont,
-            color: .secondaryLabelColor
-        )
-        guide.maximumNumberOfLines = 2
-        container.addArrangedSubview(guide)
-
-        let requestButton = NSButton(title: "Grant Access", target: self, action: #selector(requestPermissionsTapped))
-        if allGranted {
-            styleSecondaryButton(requestButton)
-        } else {
-            stylePrimaryButton(requestButton)
-        }
-        let diagnoseButton = NSButton(title: "Copy Diagnostics", target: self, action: #selector(diagnosePermissionsTapped))
-        styleSecondaryButton(diagnoseButton)
-        let resetButton = NSButton(title: "Reset Permissions…", target: self, action: #selector(resetPermissionsTapped))
-        styleDestructiveButton(resetButton)
-        [requestButton, diagnoseButton, resetButton].forEach {
-            $0.setContentHuggingPriority(.required, for: .horizontal)
-        }
-        let actions = NSStackView(views: [requestButton, diagnoseButton, resetButton])
-        actions.orientation = .horizontal
-        actions.spacing = 8
-        actions.alignment = .centerY
-        container.addArrangedSubview(actions)
-
-        let feedback = label("", font: Theme.captionFont, color: .secondaryLabelColor)
-        feedback.maximumNumberOfLines = 2
+        let allGranted = rows.allSatisfy { $0.2 }
+        let request = LantorButton("Grant Access", kind: allGranted ? .secondary : .primary)
+        request.onClick = { [weak self] in self?.requestPermissionsTapped() }
+        let diagnose = LantorButton("Copy Diagnostics", kind: .secondary)
+        diagnose.onClick = { [weak self] in self?.diagnosePermissionsTapped() }
+        let reset = LantorButton("Reset Permissions…", kind: .danger)
+        reset.onClick = { [weak self] in self?.resetPermissionsTapped() }
+        let buttons = NSStackView(views: [request, diagnose, reset])
+        buttons.orientation = .horizontal
+        buttons.alignment = .centerY
+        buttons.spacing = 8
+        let guide = helpLabel(allGranted
+            ? "All set. If a permission stops working after an update, use Reset and grant it again."
+            : "Click Grant Access to trigger the system prompts, enable Jit in System Settings, then come back here.")
+        let feedback = helpLabel("")
         permissionsFeedbackLabel = feedback
-        container.addArrangedSubview(feedback)
-        return container
-    }
-
-    private func permissionStatusRow(title: String, allowed: Bool, detail: String, actionSelector: Selector) -> NSView {
-        let icon = NSImageView()
-        if let image = NSImage(systemSymbolName: allowed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill", accessibilityDescription: title) {
-            icon.image = image
-            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-            icon.contentTintColor = allowed ? Theme.okColor : Theme.warnColor
-        }
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-
-        let titleLabel = label(title, font: NSFont.systemFont(ofSize: 13, weight: .medium), color: .labelColor)
-        let detailLabel = label(detail, font: Theme.captionFont, color: .secondaryLabelColor)
-        detailLabel.maximumNumberOfLines = 2
-        detailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let textStack = NSStackView(views: [titleLabel, detailLabel])
-        textStack.orientation = .vertical
-        textStack.spacing = 1
-        textStack.alignment = .leading
-        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let chip = statusChip(text: allowed ? "Allowed" : "Not allowed", tone: allowed ? .ok : .warn)
-        var views: [NSView] = [icon, textStack, spacer, chip]
-        if !allowed {
-            let openButton = NSButton(title: "Open System Settings", target: self, action: actionSelector)
-            styleInlineButton(openButton)
-            openButton.setContentHuggingPriority(.required, for: .horizontal)
-            views.append(openButton)
-        }
-        let row = NSStackView(views: views)
-        row.orientation = .horizontal
-        row.distribution = .fill
-        row.alignment = .centerY
-        row.spacing = 10
-        let styled = styledRow(row)
-        row.widthAnchor.constraint(equalTo: styled.widthAnchor, constant: -22).isActive = true
-        return styled
+        let actions = NSStackView(views: [guide, buttons, feedback])
+        actions.orientation = .vertical
+        actions.alignment = .leading
+        actions.spacing = 10
+        return [group("System access", card(cardRows)), group("Actions", actions)]
     }
 
     private func setPermissionsFeedback(_ message: String, kind: FeedbackKind) {
         permissionsFeedbackLabel?.stringValue = message
-        permissionsFeedbackLabel?.textColor = kind.color
+        switch kind {
+        case .neutral: permissionsFeedbackLabel?.textColor = Lantor.muted
+        case .success: permissionsFeedbackLabel?.textColor = Lantor.success
+        case .error: permissionsFeedbackLabel?.textColor = Lantor.danger
+        }
         showToast(message, kind: kind)
     }
 
-    @objc private func requestPermissionsTapped() {
+    private func requestPermissionsTapped() {
         let report = onRequestPermissions?() ?? ""
         refreshStatus()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -1362,14 +1492,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
     }
 
-    @objc private func diagnosePermissionsTapped() {
+    private func diagnosePermissionsTapped() {
         let report = onDiagnosePermissions?() ?? "No diagnostics available."
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(report, forType: .string)
         setPermissionsFeedback("Diagnostics copied to the clipboard.", kind: .success)
     }
 
-    @objc private func resetPermissionsTapped() {
+    private func resetPermissionsTapped() {
         guard let window else { return }
         let confirm = NSAlert()
         confirm.alertStyle = .warning
@@ -1390,21 +1520,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     @objc private func openPrivacySecuritySettingsTapped() {
         openSystemSettings(candidates: [
             "x-apple.systempreferences:com.apple.preference.security?Privacy",
-            "x-apple.systempreferences:com.apple.preference.security"
+            "x-apple.systempreferences:com.apple.preference.security",
         ])
     }
 
     @objc private func openAccessibilitySettingsTapped() {
         openSystemSettings(candidates: [
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy"
+            "x-apple.systempreferences:com.apple.preference.security?Privacy",
         ])
     }
 
     @objc private func openInputMonitoringSettingsTapped() {
         openSystemSettings(candidates: [
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy"
+            "x-apple.systempreferences:com.apple.preference.security?Privacy",
         ])
     }
 
@@ -1426,150 +1556,163 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     // MARK: Shared building blocks
 
-    @MainActor
-    private enum ChipTone {
-        case ok
-        case warn
-        case neutral
-        case accent
-
-        var color: NSColor {
-            switch self {
-            case .ok: return Theme.okColor
-            case .warn: return Theme.warnColor
-            case .neutral: return .secondaryLabelColor
-            case .accent: return .controlAccentColor
-            }
-        }
-    }
-
-    private func statusChip(text: String, tone: ChipTone) -> NSView {
-        let chip = NSView()
-        chip.wantsLayer = true
-        chip.layer?.cornerRadius = 8
-        chip.layer?.masksToBounds = true
-        chip.layer?.backgroundColor = tone.color.withAlphaComponent(0.15).cgColor
-        chip.setContentHuggingPriority(.required, for: .horizontal)
-
-        let labelView = label(text, font: NSFont.systemFont(ofSize: 11, weight: .semibold), color: tone.color)
-        labelView.translatesAutoresizingMaskIntoConstraints = false
-        chip.addSubview(labelView)
-        NSLayoutConstraint.activate([
-            labelView.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 8),
-            labelView.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -8),
-            labelView.topAnchor.constraint(equalTo: chip.topAnchor, constant: 3),
-            labelView.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -3)
-        ])
-        return chip
-    }
-
-    private func contentCard(_ content: NSView) -> NSView {
-        let card = NSView()
-        card.wantsLayer = true
-        card.layer?.cornerRadius = Theme.cardCornerRadius
-        card.layer?.masksToBounds = true
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.55).cgColor
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = Theme.cardStroke.cgColor
-        card.translatesAutoresizingMaskIntoConstraints = false
-
-        content.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Theme.cardPadding),
-            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Theme.cardPadding),
-            content.topAnchor.constraint(equalTo: card.topAnchor, constant: Theme.cardPadding),
-            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Theme.cardPadding)
-        ])
-        return card
-    }
-
-    private func sectionHeader(title: String, subtitle: String) -> NSView {
-        let titleLabel = label(title, font: Theme.sectionTitleFont, color: .labelColor)
-        let subtitleLabel = label(subtitle, font: Theme.captionFont, color: .secondaryLabelColor)
-        subtitleLabel.maximumNumberOfLines = 2
-        let stack = NSStackView(views: [titleLabel, subtitleLabel])
+    /// Uppercase legend above a card or content block.
+    private func group(_ title: String, _ content: NSView) -> NSView {
+        let legend = Lantor.legend(title)
+        let stack = NSStackView(views: [legend, content])
         stack.orientation = .vertical
-        stack.spacing = 2
         stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
     }
 
-    private func styledRow(_ content: NSView) -> NSView {
-        let row = NSStackView(views: [content])
-        row.orientation = .vertical
-        row.alignment = .leading
-        row.spacing = 0
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 9
-        row.layer?.masksToBounds = true
-        row.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
-        row.layer?.borderWidth = 1
-        row.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
-        row.edgeInsets = NSEdgeInsets(top: 9, left: 11, bottom: 9, right: 11)
-        return row
-    }
-
-    private func formRow(_ title: String, control: NSView) -> NSView {
-        let labelView = label(title, font: Theme.bodyFont, color: .secondaryLabelColor)
-        labelView.alignment = .right
-        labelView.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        let row = NSStackView(views: [labelView, control])
-        row.orientation = .horizontal
-        row.spacing = 10
-        row.alignment = .centerY
-        return row
-    }
-
-    private func fieldContainer(for field: NSTextField, minWidth: CGFloat, height: CGFloat = 32) -> NSView {
-        let container = NSView()
-        container.wantsLayer = true
-        container.layer?.cornerRadius = Theme.fieldCornerRadius
-        container.layer?.masksToBounds = true
-        container.layer?.backgroundColor = Theme.fieldBackground.cgColor
-        container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.widthAnchor.constraint(greaterThanOrEqualToConstant: minWidth).isActive = true
-        container.heightAnchor.constraint(equalToConstant: height).isActive = true
-
-        container.addSubview(field)
+    /// Rounded card with hairlines between rows.
+    private func card(_ rows: [NSView]) -> NSView {
+        let surface = LantorSurface(fill: Lantor.panelStrong, stroke: Lantor.line, radius: 14)
+        surface.draggable = false
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for (index, row) in rows.enumerated() {
+            if index > 0 {
+                let separator = LantorSeparator()
+                stack.addArrangedSubview(separator)
+                separator.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            }
+            row.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        surface.addSubview(stack)
         NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            field.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            field.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+            stack.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 1),
+            stack.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -1),
+            stack.topAnchor.constraint(equalTo: surface.topAnchor, constant: 1),
+            stack.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -1),
         ])
-        return container
+        return surface
     }
 
-    private func label(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
-        let textField = NSTextField(labelWithString: text)
-        textField.font = font
-        textField.textColor = color
-        return textField
+    /// Label column + control (+ help line under the control), laid out with explicit constraints.
+    private func formRow(_ title: String, control: NSView, help: NSView? = nil) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let label = Lantor.label(title, Lantor.font(13, .semibold), Lantor.inkSecondary)
+        control.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(label)
+        row.addSubview(control)
+        var constraints = [
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 16),
+            label.widthAnchor.constraint(equalToConstant: Theme.labelColumn),
+            label.centerYAnchor.constraint(equalTo: control.centerYAnchor),
+            control.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 14),
+            control.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -13),
+            control.topAnchor.constraint(equalTo: row.topAnchor, constant: 9),
+        ]
+        if let help {
+            help.translatesAutoresizingMaskIntoConstraints = false
+            row.addSubview(help)
+            constraints += [
+                help.leadingAnchor.constraint(equalTo: control.leadingAnchor, constant: 3),
+                help.trailingAnchor.constraint(lessThanOrEqualTo: control.trailingAnchor),
+                help.topAnchor.constraint(equalTo: control.bottomAnchor, constant: 2),
+                help.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -12),
+            ]
+        } else {
+            constraints.append(control.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -9))
+        }
+        NSLayoutConstraint.activate(constraints)
+        return row
     }
 
-    private func stylePrimaryButton(_ button: NSButton) {
-        button.bezelStyle = .rounded
-        button.controlSize = .regular
-        button.bezelColor = .controlAccentColor
-        button.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    /// Icon tile + title/subtitle on the left, accessory control on the right.
+    private func toggleRow(symbol: String, title: String, subtitle: String, accessory: NSView, subtitleAccessory: NSView? = nil) -> (row: NSView, subtitle: NSTextField) {
+        let titleLabel = Lantor.label(title, Lantor.font(14, .semibold), Lantor.ink)
+        // Single line: wrapping labels without a fixed width under-report their height in stack views.
+        let subtitleLabel = Lantor.label(subtitle, Lantor.font(12), Lantor.muted)
+        subtitleLabel.toolTip = subtitle.isEmpty ? nil : subtitle
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        var subtitleView: NSView = subtitleLabel
+        if let subtitleAccessory {
+            let line = NSStackView(views: [subtitleLabel, subtitleAccessory])
+            line.orientation = .horizontal
+            line.alignment = .firstBaseline
+            line.spacing = 0
+            subtitleView = line
+        }
+        let text = NSStackView(views: [titleLabel, subtitleView])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 2
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        accessory.setContentHuggingPriority(.required, for: .horizontal)
+        accessory.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let row = NSStackView(views: [LantorIconTile(symbol), text, spacer, accessory])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.setCustomSpacing(14, after: spacer)
+        row.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+        return (row, subtitleLabel)
     }
 
-    private func styleSecondaryButton(_ button: NSButton) {
-        button.bezelStyle = .rounded
-        button.controlSize = .regular
-        button.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+    private func helpLabel(_ text: String, width: CGFloat = 560) -> NSTextField {
+        let label = Lantor.label(text, Lantor.font(12), Lantor.muted, lines: 3)
+        label.preferredMaxLayoutWidth = width
+        return label
+    }
+}
+
+/// Status dot with a soft halo, as in Lantor's readiness indicators.
+@MainActor
+final class StatusDotView: NSView {
+    var color: NSColor = Lantor.success { didSet { needsDisplay = true } }
+    var halo: NSColor = Lantor.successSoft { didSet { needsDisplay = true } }
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 14).isActive = true
+        heightAnchor.constraint(equalToConstant: 14).isActive = true
     }
 
-    private func styleInlineButton(_ button: NSButton) {
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        halo.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+        color.setFill()
+        NSBezierPath(ovalIn: bounds.insetBy(dx: 3, dy: 3)).fill()
+    }
+}
+
+/// Accent text link ("Download better voices…").
+@MainActor
+final class LantorLinkButton: NSButton {
+    private let action_: () -> Void
+
+    init(_ title: String, action: @escaping () -> Void) {
+        action_ = action
+        super.init(frame: .zero)
+        isBordered = false
+        translatesAutoresizingMaskIntoConstraints = false
+        attributedTitle = NSAttributedString(string: title, attributes: [.font: Lantor.font(12, .medium), .foregroundColor: Lantor.accent])
+        target = self
+        self.action = #selector(clicked)
+        setContentHuggingPriority(.required, for: .horizontal)
     }
 
-    private func styleDestructiveButton(_ button: NSButton) {
-        styleSecondaryButton(button)
-        button.contentTintColor = .systemRed
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func clicked() { action_() }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 }

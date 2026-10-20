@@ -5,12 +5,15 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 ## Features
 
 - Global action palette hotkey (default: `Option + A`)
-- Translate, Refine, Vocabulary, and Custom Prompt actions from one floating panel
-- Vocabulary mode explains English word meaning, pronunciation, usage, examples, and common notes
-- Native macOS speech button in Vocabulary mode for fast selected-text pronunciation
+- Translate, Polish, Custom, and Words actions from one floating panel, styled with Lantor's design tokens in light and dark mode
+- The palette header shows the AI connection in use (e.g. `Codex · gpt-5.1`) and the run status (`Streaming`, `Done · 1.4s`, `Failed`)
+- The selection appears as a quote card with its length and, for Translate, the detected direction (e.g. `English → 简体中文`)
+- Custom offers your three most recent instructions as one-click presets
+- Words shows a word card: headword, part of speech, IPA, meaning, usage chips, examples with translations, and notes
+- Native macOS speech in Words (`⌥S` or the speaker button); pick the voice in Settings → General
 - Streaming AI output with in-panel Stop, Copy, and Replace controls
 - Copy returns only the generated output; Replace pastes the output back into the source app
-- Palette keyboard: `↑/↓` or `⌘1–4` switch actions, `↩` runs, `⌘C` copies the result, `⌘↩` replaces, `⎋` stops/closes
+- Palette keyboard: `↑/↓` or `⌘1–4` switch actions (Translate, Polish, Custom, Words), `↩` runs, `⌘C` copies the result, `⌘↩` replaces, `⌥S` speaks in Words, `⎋` stops/closes
 - Translate detects the source language and flips direction automatically (e.g. Chinese → English)
 - The palette opens instantly at the selection, works without a selection (Custom), and is resizable once output appears
 - Recent Results in the menu bar reopen previous outputs; "Last Result" is one click away when nothing is selected
@@ -91,8 +94,11 @@ Stop cancels the child process, and the final response replaces streamed output.
 swift test
 JIT_LIVE_CLI=1 swift test --filter Live   # real Codex and Claude calls, Finder-like environment
 swift build
+JIT_SNAPSHOT_DIR=/tmp/jit-snap swift run  # debug builds only: render palette + Settings states (light/dark) to PNGs, then exit
 ./scripts/release.sh
 ```
+
+The Words card relies on the default Words prompt's `Headword: / Part of speech: / IPA: / Meaning: / Usage: / Examples: / Notes:` format. A customized prompt that returns other text is shown as formatted plain text instead. A saved copy of the previous built-in Words prompt is upgraded automatically.
 
 ## Permissions and System Settings
 

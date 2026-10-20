@@ -20,59 +20,6 @@ final class BubblePanel: NSPanel {
     }
 }
 
-final class DraggableVisualEffectView: NSVisualEffectView {
-    override var mouseDownCanMoveWindow: Bool { true }
-}
-
-final class DraggableView: NSView {
-    override var mouseDownCanMoveWindow: Bool { true }
-}
-
-extension NSColor {
-    convenience init(hex: UInt32, alpha: CGFloat = 1) {
-        self.init(
-            calibratedRed: CGFloat((hex >> 16) & 0xff) / 255,
-            green: CGFloat((hex >> 8) & 0xff) / 255,
-            blue: CGFloat(hex & 0xff) / 255,
-            alpha: alpha
-        )
-    }
-
-    static func jitDynamic(light: UInt32, dark: UInt32, alpha: CGFloat = 1) -> NSColor {
-        NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return NSColor(hex: isDark ? dark : light, alpha: alpha)
-        }
-    }
-}
-
-@MainActor
-private enum LantorVisual {
-    // System semantic colors so the palette follows appearance, accent and accessibility settings.
-    static let surface = NSColor.clear
-    static let panel = NSColor.jitDynamic(light: 0x000000, dark: 0xffffff, alpha: 0.05)
-    static let panelStrong = NSColor.jitDynamic(light: 0x000000, dark: 0xffffff, alpha: 0.08)
-    static let input = NSColor.jitDynamic(light: 0xffffff, dark: 0x000000, alpha: 0.5)
-    static let control = NSColor.jitDynamic(light: 0x000000, dark: 0xffffff, alpha: 0.07)
-    static let ink = NSColor.labelColor
-    static let secondaryInk = NSColor.secondaryLabelColor
-    static let mutedInk = NSColor.secondaryLabelColor.withAlphaComponent(0.8)
-    static let border = NSColor.separatorColor
-    static let borderSubtle = NSColor.separatorColor.withAlphaComponent(0.5)
-    static let accent = NSColor.controlAccentColor
-    static let accentInk = NSColor.white
-    static let accentSoft = NSColor.controlAccentColor.withAlphaComponent(0.14)
-    static let accentSoftBorder = NSColor.controlAccentColor.withAlphaComponent(0.35)
-    static let thinkingSoft = NSColor.systemTeal.withAlphaComponent(0.16)
-    static let thinkingInk = NSColor.systemTeal
-    static let successSoft = NSColor.systemGreen.withAlphaComponent(0.15)
-    static let successInk = NSColor.systemGreen
-    static let warningSoft = NSColor.systemOrange.withAlphaComponent(0.17)
-    static let warningInk = NSColor.systemOrange
-    static let errorSoft = NSColor.systemRed.withAlphaComponent(0.14)
-    static let errorInk = NSColor.systemRed
-}
-
 struct FeatureConfig: Codable {
     var id: String
     var displayName: String
@@ -194,21 +141,48 @@ struct AppConfig {
     """
 
     static let defaultVocabularyPromptTemplate = """
-    You are an English vocabulary coach. Help the user learn the selected English word, phrase, or sentence.
+    You are an English vocabulary coach for a Chinese-speaking learner. Explain the selected English word or phrase.
 
-    Output format (plain text):
-    1) Headword: the main English word or phrase to learn.
-    2) Pronunciation: give IPA if confident, plus a simple pronunciation hint.
-    3) Meaning: explain the meaning in Chinese, with the core English sense.
-    4) Usage: list 2-4 common collocations or sentence patterns.
-    5) Examples: give 2 short English example sentences, each followed by a Chinese translation.
-    6) Notes: mention common mistakes, register, or similar words only if useful.
+    Reply in exactly this plain-text format, with no markdown and no extra sections:
+    Headword: <the word or phrase to learn>
+    Part of speech: <adj / noun / verb / phrase …>
+    IPA: /<IPA>/
+    Meaning: <Chinese meaning> — <short English definition>
+    Usage:
+    - <common collocation, 2-4 words>
+    - <common collocation, 2-4 words>
+    - <common collocation, 2-4 words>
+    Examples:
+    - <short English example sentence> | <Chinese translation>
+    - <short English example sentence> | <Chinese translation>
+    Notes: <one short note on register, common mistakes or similar words; omit this line if not useful>
 
-    Keep it concise, practical, and focused on learning the word.
+    If the text is a whole sentence, pick its most useful word or phrase as the headword.
 
     Text:
     {{text}}
     """
+
+    /// Earlier built-in Words prompts; a saved copy that still matches one is upgraded
+    /// so the palette can render the structured Words card.
+    static let legacyVocabularyPromptTemplates = [
+        """
+        You are an English vocabulary coach. Help the user learn the selected English word, phrase, or sentence.
+
+        Output format (plain text):
+        1) Headword: the main English word or phrase to learn.
+        2) Pronunciation: give IPA if confident, plus a simple pronunciation hint.
+        3) Meaning: explain the meaning in Chinese, with the core English sense.
+        4) Usage: list 2-4 common collocations or sentence patterns.
+        5) Examples: give 2 short English example sentences, each followed by a Chinese translation.
+        6) Notes: mention common mistakes, register, or similar words only if useful.
+
+        Keep it concise, practical, and focused on learning the word.
+
+        Text:
+        {{text}}
+        """,
+    ]
 
     static let defaults = AppConfig(
         backend: .codexCLI,
@@ -236,7 +210,7 @@ struct AppConfig {
             ),
             FeatureConfig(
                 id: "refine",
-                displayName: "Refine",
+                displayName: "Polish",
                 hotkeyKey: "S",
                 hotkeyOption: true,
                 hotkeyCommand: false,
@@ -262,7 +236,7 @@ struct AppConfig {
             ),
             FeatureConfig(
                 id: "vocabulary",
-                displayName: "Vocabulary",
+                displayName: "Words",
                 hotkeyKey: "V",
                 hotkeyOption: true,
                 hotkeyCommand: false,
@@ -295,13 +269,17 @@ struct AppConfig {
         var item = feature
         switch item.id {
         case "translate": item.displayName = "Translate"
-        case "refine": item.displayName = "Refine"
+        case "refine": item.displayName = "Polish"
         case "custom": item.displayName = "Custom"
-        case "vocabulary": item.displayName = "Vocabulary"
+        case "vocabulary": item.displayName = "Words"
         default: break
         }
-        if item.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let trimmed = item.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
             item.promptTemplate = defaultPromptTemplate(for: item.id)
+        } else if item.id == "vocabulary",
+                  legacyVocabularyPromptTemplates.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed }) {
+            item.promptTemplate = defaultVocabularyPromptTemplate
         }
         return item
     }
@@ -395,6 +373,23 @@ struct AppConfig {
     var connectionModelName: String {
         guard let cli = localCLI else { return model }
         return cli.model.isEmpty ? "\(cli.tool.displayName) default" : cli.model
+    }
+
+    /// Header chip text in the palette: "Codex · gpt-5.1", "Claude Code · default", or the API model.
+    var connectionShortLabel: String {
+        guard let cli = localCLI else { return model.oneLinePreview(32) }
+        let name = cli.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(cli.tool.displayName) · \(name.isEmpty ? "default" : name.oneLinePreview(24))"
+    }
+
+    /// "English → 简体中文" for the Translate selection card.
+    func translationDirectionLabel(for text: String) -> String {
+        let target = TranslationLanguage.nativeName(for: effectiveTargetLanguage(for: text))
+        guard let dominant = LanguageDetector.dominantLanguage(of: text),
+              let source = TranslationLanguage.all.first(where: { LanguageDetector.matches(languageName: $0.name, dominant) }) else {
+            return "Auto → \(target)"
+        }
+        return "\(source.native) → \(target)"
     }
 
     func save() {
@@ -1087,10 +1082,38 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     private var stateHandler: ((Bool) -> Void)?
     private(set) var voice: AVSpeechSynthesisVoice?
 
+    static let voiceDefaultsKey = "speechVoiceIdentifier"
+
     override init() {
         super.init()
-        voice = Self.preferredEnglishVoice()
+        voice = Self.savedVoice() ?? Self.preferredEnglishVoice()
         synthesizer.delegate = self
+    }
+
+    /// The voice chosen in Settings, or nil for automatic (best installed).
+    var selectedVoiceIdentifier: String? {
+        Self.savedVoice()?.identifier
+    }
+
+    func selectVoice(identifier: String?) {
+        if let identifier, AVSpeechSynthesisVoice(identifier: identifier) != nil {
+            UserDefaults.standard.set(identifier, forKey: Self.voiceDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.voiceDefaultsKey)
+        }
+        stop()
+        voice = Self.savedVoice() ?? Self.preferredEnglishVoice()
+    }
+
+    private static func savedVoice() -> AVSpeechSynthesisVoice? {
+        UserDefaults.standard.string(forKey: voiceDefaultsKey).flatMap(AVSpeechSynthesisVoice.init(identifier:))
+    }
+
+    /// Installed English voices, best first, without novelty voices.
+    static func englishVoices() -> [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.lowercased().hasPrefix("en") && score($0) > -500 }
+            .sorted { score($0) > score($1) || (score($0) == score($1) && $0.name < $1.name) }
     }
 
     var voiceDescription: String {
@@ -1143,30 +1166,32 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
 
     /// Best installed English voice: premium > enhanced > compact, preferring en-US, skipping novelty voices.
     static func preferredEnglishVoice() -> AVSpeechSynthesisVoice? {
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.lowercased().hasPrefix("en") }
-        func score(_ voice: AVSpeechSynthesisVoice) -> Int {
-            var value = 0
-            switch voice.quality {
-            case .premium: value += 300
-            case .enhanced: value += 200
-            default: break
-            }
-            switch voice.language {
-            case "en-US": value += 30
-            case "en-GB": value += 20
-            default: value += 10
-            }
-            let identifier = voice.identifier.lowercased()
-            if identifier.contains("super-compact") {
-                value -= 50
-            }
-            // Skip Eloquence and the legacy/novelty "com.apple.speech.synthesis.voice.*" voices.
-            if identifier.contains("eloquence") || identifier.contains("speech.synthesis.voice") {
-                value -= 1000
-            }
-            return value
+        AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.lowercased().hasPrefix("en") }
+            .max { score($0) < score($1) }
+    }
+
+    private static func score(_ voice: AVSpeechSynthesisVoice) -> Int {
+        var value = 0
+        switch voice.quality {
+        case .premium: value += 300
+        case .enhanced: value += 200
+        default: break
         }
-        return voices.max { score($0) < score($1) }
+        switch voice.language {
+        case "en-US": value += 30
+        case "en-GB": value += 20
+        default: value += 10
+        }
+        let identifier = voice.identifier.lowercased()
+        if identifier.contains("super-compact") {
+            value -= 50
+        }
+        // Skip Eloquence and the legacy/novelty "com.apple.speech.synthesis.voice.*" voices.
+        if identifier.contains("eloquence") || identifier.contains("speech.synthesis.voice") {
+            value -= 1000
+        }
+        return value
     }
 
     static func qualityLabel(_ quality: AVSpeechSynthesisVoiceQuality) -> String {
@@ -1371,6 +1396,19 @@ final class HistoryStore {
         entries.first { $0.id.uuidString == id }
     }
 
+    /// Most recent distinct Custom instructions, newest first.
+    func recentInstructions(limit: Int) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for entry in entries where entry.modeID == "custom" {
+            guard let instruction = entry.instruction?.trimmingCharacters(in: .whitespacesAndNewlines), !instruction.isEmpty,
+                  seen.insert(instruction.lowercased()).inserted else { continue }
+            result.append(instruction)
+            if result.count == limit { break }
+        }
+        return result
+    }
+
     private func persist() {
         if let data = try? JSONEncoder().encode(entries) {
             UserDefaults.standard.set(data, forKey: Self.defaultsKey)
@@ -1424,6 +1462,20 @@ enum LanguageDetector {
     }
 }
 
+/// Target languages offered in Settings. `name` is stored and sent to the prompt; `native` is shown.
+enum TranslationLanguage {
+    static let all: [(name: String, native: String)] = [
+        ("Chinese", "简体中文"), ("English", "English"), ("Japanese", "日本語"), ("Korean", "한국어"),
+        ("French", "Français"), ("German", "Deutsch"), ("Spanish", "Español"), ("Portuguese", "Português"),
+        ("Italian", "Italiano"), ("Russian", "Русский"),
+    ]
+
+    static func nativeName(for name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return all.first(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame })?.native ?? trimmed
+    }
+}
+
 // MARK: - Friendly error messages
 
 enum FriendlyError {
@@ -1473,1118 +1525,10 @@ enum FriendlyError {
     }
 }
 
-// MARK: - Output formatting
-
-/// Renders the model's plain-text / light-markdown output as readable attributed text:
-/// numbered "Label: value" sections, bullets, `**bold**`, `code`, and /IPA/ runs.
-@MainActor
-enum OutputFormatter {
-    struct Style {
-        var body: NSFont
-        var ink: NSColor
-        var secondaryInk: NSColor
-        var accent: NSColor
-    }
-
-    private static let sectionPattern = try! NSRegularExpression(pattern: #"^\s*(\d+)[.)]\s*\**([^:：*]{1,40}?)\**\s*[:：]\s*(.*)$"#)
-    private static let numberedPattern = try! NSRegularExpression(pattern: #"^\s*(\d+)[.)]\s+(.*)$"#)
-    private static let bulletPattern = try! NSRegularExpression(pattern: #"^\s*[-*•]\s+(.*)$"#)
-    private static let headingPattern = try! NSRegularExpression(pattern: #"^\s*#{1,6}\s+(.*)$"#)
-    private static let inlinePattern = try! NSRegularExpression(pattern: #"\*\*(.+?)\*\*|`([^`\n]+)`|(?<![\w:])/([^/\n]{1,60})/(?![\w/])"#)
-
-    static func attributedString(from text: String, style: Style) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-        let lines = text.components(separatedBy: "\n")
-        for (index, line) in lines.enumerated() {
-            let rendered = renderLine(line, style: style)
-            result.append(rendered)
-            if index < lines.count - 1 {
-                result.append(NSAttributedString(string: "\n"))
-            }
-        }
-        return result
-    }
-
-    private static func renderLine(_ line: String, style: Style) -> NSAttributedString {
-        let nsLine = line as NSString
-        let full = NSRange(location: 0, length: nsLine.length)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
-        paragraph.lineSpacing = 2
-        paragraph.paragraphSpacing = 3
-
-        if let match = sectionPattern.firstMatch(in: line, range: full) {
-            let label = nsLine.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespaces)
-            let value = nsLine.substring(with: match.range(at: 3))
-            guard label.split(separator: " ").count <= 3, label.count <= 24 else {
-                return renderNumbered(line, style: style)
-            }
-            paragraph.paragraphSpacingBefore = 8
-            let out = NSMutableAttributedString()
-            if label.lowercased() == "headword" {
-                let font = NSFont.systemFont(ofSize: style.body.pointSize + 6, weight: .bold)
-                out.append(inline(value.isEmpty ? label : value, font: font, color: style.ink, paragraph: paragraph, style: style))
-                return out
-            }
-            let labelFont = NSFont.systemFont(ofSize: style.body.pointSize - 1, weight: .semibold)
-            out.append(NSAttributedString(string: label.uppercased(), attributes: [
-                .font: labelFont, .foregroundColor: style.accent, .paragraphStyle: paragraph, .kern: 0.4,
-            ]))
-            if !value.isEmpty {
-                out.append(NSAttributedString(string: "  ", attributes: [.font: style.body, .paragraphStyle: paragraph]))
-                out.append(inline(value, font: style.body, color: style.ink, paragraph: paragraph, style: style))
-            }
-            return out
-        }
-        if let match = headingPattern.firstMatch(in: line, range: full) {
-            let value = nsLine.substring(with: match.range(at: 1))
-            paragraph.paragraphSpacingBefore = 8
-            let font = NSFont.systemFont(ofSize: style.body.pointSize + 1, weight: .semibold)
-            return inline(value, font: font, color: style.ink, paragraph: paragraph, style: style)
-        }
-        if let match = bulletPattern.firstMatch(in: line, range: full) {
-            let value = nsLine.substring(with: match.range(at: 1))
-            paragraph.firstLineHeadIndent = 10
-            paragraph.headIndent = 24
-            paragraph.tabStops = [NSTextTab(textAlignment: .left, location: 24)]
-            let out = NSMutableAttributedString(string: "•\t", attributes: [
-                .font: style.body, .foregroundColor: style.secondaryInk, .paragraphStyle: paragraph,
-            ])
-            out.append(inline(value, font: style.body, color: style.ink, paragraph: paragraph, style: style))
-            return out
-        }
-        if numberedPattern.firstMatch(in: line, range: full) != nil {
-            return renderNumbered(line, style: style)
-        }
-        return inline(line, font: style.body, color: style.ink, paragraph: paragraph, style: style)
-    }
-
-    private static func renderNumbered(_ line: String, style: Style) -> NSAttributedString {
-        let nsLine = line as NSString
-        let full = NSRange(location: 0, length: nsLine.length)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
-        paragraph.lineSpacing = 2
-        paragraph.paragraphSpacing = 3
-        if let match = numberedPattern.firstMatch(in: line, range: full) {
-            let number = nsLine.substring(with: match.range(at: 1))
-            let value = nsLine.substring(with: match.range(at: 2))
-            paragraph.firstLineHeadIndent = 4
-            paragraph.headIndent = 26
-            paragraph.tabStops = [NSTextTab(textAlignment: .left, location: 26)]
-            paragraph.paragraphSpacingBefore = 4
-            let out = NSMutableAttributedString(string: "\(number).\t", attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: style.body.pointSize, weight: .semibold),
-                .foregroundColor: style.accent, .paragraphStyle: paragraph,
-            ])
-            out.append(inline(value, font: style.body, color: style.ink, paragraph: paragraph, style: style))
-            return out
-        }
-        return inline(line, font: style.body, color: style.ink, paragraph: paragraph, style: style)
-    }
-
-    private static func inline(_ text: String, font: NSFont, color: NSColor, paragraph: NSParagraphStyle, style: Style) -> NSAttributedString {
-        let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: paragraph]
-        let out = NSMutableAttributedString()
-        let nsText = text as NSString
-        var cursor = 0
-        for match in inlinePattern.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
-            if match.range.location > cursor {
-                out.append(NSAttributedString(string: nsText.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), attributes: base))
-            }
-            if match.range(at: 1).location != NSNotFound {
-                let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
-                var attrs = base
-                attrs[.font] = bold
-                out.append(NSAttributedString(string: nsText.substring(with: match.range(at: 1)), attributes: attrs))
-            } else if match.range(at: 2).location != NSNotFound {
-                var attrs = base
-                attrs[.font] = NSFont.monospacedSystemFont(ofSize: font.pointSize - 1, weight: .regular)
-                attrs[.backgroundColor] = style.secondaryInk.withAlphaComponent(0.12)
-                out.append(NSAttributedString(string: nsText.substring(with: match.range(at: 2)), attributes: attrs))
-            } else if match.range(at: 3).location != NSNotFound {
-                var attrs = base
-                attrs[.font] = NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .medium)
-                attrs[.foregroundColor] = style.accent
-                out.append(NSAttributedString(string: "/" + nsText.substring(with: match.range(at: 3)) + "/", attributes: attrs))
-            }
-            cursor = match.range.location + match.range.length
-        }
-        if cursor < nsText.length {
-            out.append(NSAttributedString(string: nsText.substring(from: cursor), attributes: base))
-        }
-        return out
-    }
-}
-
-// MARK: - Palette
-
-@MainActor
-final class PaletteContainerView: NSVisualEffectView {
-    var onAppearanceChange: (() -> Void)?
-    override var mouseDownCanMoveWindow: Bool { true }
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        onAppearanceChange?()
-    }
-}
-
-@MainActor
-final class CommandInputWindowController: NSWindowController, NSWindowDelegate {
-    private enum Layout {
-        static let compactSize = NSSize(width: 620, height: 188)
-        static let defaultExpandedSize = NSSize(width: 620, height: 520)
-        static let minExpandedSize = NSSize(width: 520, height: 340)
-        static let maxSize = NSSize(width: 1280, height: 1100)
-        static let sizeDefaultsKey = "paletteExpandedSize"
-    }
-
-    private enum Phase: Equatable {
-        case readingSelection
-        case noSelection
-        case idle
-        case running
-        case done
-        case error
-    }
-
-    private enum ActionButtonKind {
-        case primary
-        case secondary
-        case warning
-    }
-
-    struct Mode {
-        let id: String
-        let title: String
-        let requiresInstruction: Bool
-        let supportsReplace: Bool
-        let promptPreview: String
-    }
-
-    // Callbacks
-    var onSubmit: ((_ modeID: String, _ instruction: String?, _ selectedText: String, _ onPartial: @escaping @Sendable (String) -> Void, _ completion: @escaping @Sendable (Result<String, Error>) -> Void) -> TextProcessingRun?)?
-    var onToggleSpeech: ((String, @escaping @MainActor (Bool) -> Void) -> Bool)?
-    var onStopSpeech: (() -> Void)?
-    var onReplace: ((String) -> Void)?
-    var onOpenSettings: (() -> Void)?
-    var onResult: ((HistoryEntry) -> Void)?
-    var onClose: (() -> Void)?
-    var lastResult: HistoryEntry?
-    /// Replace pastes into the source app; disabled when showing a stored result.
-    var allowsReplace = true
-    var speechVoiceDescription: String = ""
-    /// Setup problem (missing permissions / API key) surfaced inline instead of redirecting to Settings.
-    var setupNotice: String?
-
-    // Views
-    private let container = PaletteContainerView()
-    private let titleLabel = NSTextField(labelWithString: "Jit")
-    private let modeStack = NSStackView()
-    private var modeButtons: [NSButton] = []
-    private let hintLabel = NSTextField(labelWithString: "")
-    private let commandContainer = NSView()
-    private let commandField = NSTextField(string: "")
-    private let outputScroll = NSScrollView()
-    private let outputTextView = NSTextView()
-    private let progressIndicator = NSProgressIndicator()
-    private let speakButton = NSButton(title: "", target: nil, action: nil)
-    private let settingsButton = NSButton(title: "Open Settings", target: nil, action: nil)
-    private let lastResultButton = NSButton(title: "Last Result", target: nil, action: nil)
-    private let copyButton = NSButton(title: "Copy  ⌘C", target: nil, action: nil)
-    private let replaceButton = NSButton(title: "Replace  ⌘↩", target: nil, action: nil)
-    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-    private let runButton = NSButton(title: "Run  ↩", target: nil, action: nil)
-
-    // State
-    private let modes: [Mode]
-    private var currentModeIndex = 0
-    private var phase: Phase = .readingSelection
-    private var selectedText = ""
-    private var selectedPreview = ""
-    private var customInstructionDraft = ""
-    private var rawOutput = ""
-    private var outputDidStream = false
-    private var errorMessage = ""
-    private var errorNeedsSettings = false
-    private var expanded = false
-    private var activeRun: TextProcessingRun?
-    private var isSpeakingSelectedText = false
-    private var runGeneration = 0
-    private var anchorRect: NSRect
-    private var localKeyMonitor: Any?
-    private var globalClickMonitor: Any?
-    private var localClickMonitor: Any?
-
-    init(anchor: NSRect, modes: [Mode], defaultModeID: String = "custom") {
-        self.modes = modes.isEmpty
-            ? [Mode(id: "custom", title: "Custom", requiresInstruction: true, supportsReplace: true, promptPreview: "Custom instruction mode")]
-            : modes
-        self.anchorRect = anchor
-        let panel = BubblePanel(
-            contentRect: NSRect(origin: .zero, size: Layout.compactSize),
-            styleMask: [.borderless, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isMovable = true
-        panel.isMovableByWindowBackground = true
-        panel.level = .floating
-        panel.isFloatingPanel = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.hidesOnDeactivate = false
-        panel.minSize = Layout.compactSize
-        panel.maxSize = Layout.compactSize
-        super.init(window: panel)
-        panel.delegate = self
-        panel.keyDownHandler = { [weak self] event in
-            self?.handlePanelKeyDown(event) ?? false
-        }
-        buildUI()
-        if let index = self.modes.firstIndex(where: { $0.id == defaultModeID }) {
-            currentModeIndex = index
-        }
-        applyMode()
-        render()
-        position(near: anchor)
-        installKeyMonitor()
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    // MARK: Public state transitions
-
-    /// Called once the selection is known. `nil`/empty switches to the no-selection state.
-    func setSelection(_ text: String?) {
-        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        selectedText = trimmed
-        selectedPreview = trimmed.oneLinePreview(80)
-        if trimmed.isEmpty {
-            phase = .noSelection
-            if let index = modes.firstIndex(where: { $0.requiresInstruction }) {
-                currentModeIndex = index
-            }
-        } else {
-            phase = .idle
-        }
-        applyMode()
-        render()
-    }
-
-    /// Reopens a previous result in the done state.
-    func showHistoryEntry(_ entry: HistoryEntry) {
-        selectedText = entry.selectedText
-        selectedPreview = entry.selectedText.oneLinePreview(80)
-        if let index = modes.firstIndex(where: { $0.id == entry.modeID }) {
-            currentModeIndex = index
-        }
-        customInstructionDraft = entry.instruction ?? ""
-        allowsReplace = false
-        rawOutput = entry.output
-        outputDidStream = false
-        phase = .done
-        applyMode()
-        expandForOutputIfNeeded()
-        setOutputText(rawOutput)
-        render()
-    }
-
-    func focus() {
-        guard let window else { return }
-        window.makeKeyAndOrderFront(nil)
-        let mode = modes[currentModeIndex]
-        if mode.requiresInstruction && phase != .running && phase != .readingSelection {
-            window.makeFirstResponder(commandField)
-        } else {
-            window.makeFirstResponder(nil)
-        }
-    }
-
-    /// Puts the caret back without re-activating the app (the user may have moved on while waiting).
-    private func restoreFirstResponder() {
-        guard let window, window.isKeyWindow else { return }
-        window.makeFirstResponder(modes[currentModeIndex].requiresInstruction ? commandField : nil)
-    }
-
-    func beginAutoDismiss() {
-        stopOutsideClickMonitor()
-        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            Task { @MainActor in
-                self?.closeIfClickOutside()
-            }
-        }
-        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
-            self?.closeIfClickOutside()
-            return event
-        }
-    }
-
-    // MARK: UI construction
-
-    private func buildUI() {
-        guard let contentView = window?.contentView else { return }
-
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.material = .hudWindow
-        container.blendingMode = .behindWindow
-        container.state = .active
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 16
-        container.layer?.masksToBounds = true
-        container.layer?.borderWidth = 1
-        container.onAppearanceChange = { [weak self] in
-            self?.applyColors()
-        }
-
-        titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        progressIndicator.style = .spinning
-        progressIndicator.controlSize = .small
-        progressIndicator.isDisplayedWhenStopped = false
-        progressIndicator.translatesAutoresizingMaskIntoConstraints = false
-        progressIndicator.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        progressIndicator.heightAnchor.constraint(equalToConstant: 16).isActive = true
-
-        let headerSpacer = NSView()
-        headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let headerRow = NSStackView(views: [titleLabel, headerSpacer, progressIndicator])
-        headerRow.orientation = .horizontal
-        headerRow.spacing = 10
-        headerRow.alignment = .centerY
-        headerRow.translatesAutoresizingMaskIntoConstraints = false
-
-        modeStack.orientation = .horizontal
-        modeStack.spacing = 4
-        modeStack.alignment = .centerY
-        modeStack.distribution = .fillEqually
-        modeStack.wantsLayer = true
-        modeStack.layer?.cornerRadius = 10
-        modeStack.layer?.masksToBounds = true
-        modeStack.layer?.borderWidth = 1
-        modeStack.edgeInsets = NSEdgeInsets(top: 3, left: 3, bottom: 3, right: 3)
-        modeStack.translatesAutoresizingMaskIntoConstraints = false
-        modeStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        modeButtons = modes.enumerated().map { index, mode in
-            let button = NSButton(title: compactTitle(for: mode), target: self, action: #selector(modeButtonTapped(_:)))
-            button.identifier = NSUserInterfaceItemIdentifier("\(index)")
-            button.isBordered = false
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 8
-            button.layer?.masksToBounds = true
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.lineBreakMode = .byTruncatingTail
-            button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            button.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            button.heightAnchor.constraint(equalToConstant: 28).isActive = true
-            button.toolTip = "\(mode.title)  ⌘\(index + 1)"
-            modeStack.addArrangedSubview(button)
-            return button
-        }
-
-        hintLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
-        hintLabel.lineBreakMode = .byTruncatingTail
-        hintLabel.maximumNumberOfLines = 1
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        commandField.translatesAutoresizingMaskIntoConstraints = false
-        commandField.font = NSFont.systemFont(ofSize: 15)
-        commandField.drawsBackground = false
-        commandField.isBordered = false
-        commandField.focusRingType = .none
-        commandField.usesSingleLineMode = true
-        commandField.lineBreakMode = .byTruncatingTail
-        commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        commandContainer.translatesAutoresizingMaskIntoConstraints = false
-        commandContainer.wantsLayer = true
-        commandContainer.layer?.cornerRadius = 10
-        commandContainer.layer?.masksToBounds = true
-        commandContainer.layer?.borderWidth = 1
-        commandContainer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        commandContainer.addSubview(commandField)
-
-        outputScroll.translatesAutoresizingMaskIntoConstraints = false
-        outputScroll.hasVerticalScroller = true
-        outputScroll.hasHorizontalScroller = false
-        outputScroll.autohidesScrollers = true
-        outputScroll.borderType = .noBorder
-        outputScroll.drawsBackground = false
-        outputScroll.wantsLayer = true
-        outputScroll.layer?.cornerRadius = 12
-        outputScroll.layer?.masksToBounds = true
-        outputScroll.layer?.borderWidth = 1
-        outputScroll.isHidden = true
-
-        outputTextView.isEditable = false
-        outputTextView.isSelectable = true
-        outputTextView.drawsBackground = false
-        outputTextView.isRichText = false
-        outputTextView.importsGraphics = false
-        outputTextView.font = NSFont.systemFont(ofSize: 14)
-        outputTextView.textContainerInset = NSSize(width: 8, height: 8)
-        outputTextView.isVerticallyResizable = true
-        outputTextView.isHorizontallyResizable = false
-        outputTextView.autoresizingMask = [.width]
-        outputTextView.minSize = NSSize(width: 0, height: 0)
-        outputTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        outputTextView.textContainer?.widthTracksTextView = true
-        outputTextView.textContainer?.containerSize = NSSize(width: Layout.compactSize.width, height: CGFloat.greatestFiniteMagnitude)
-        outputTextView.textContainer?.lineBreakMode = .byWordWrapping
-        outputTextView.textContainer?.lineFragmentPadding = 2
-        outputScroll.documentView = outputTextView
-
-        speakButton.target = self
-        speakButton.action = #selector(speakTapped)
-        speakButton.imagePosition = .imageOnly
-        settingsButton.target = self
-        settingsButton.action = #selector(settingsTapped)
-        lastResultButton.target = self
-        lastResultButton.action = #selector(lastResultTapped)
-        copyButton.target = self
-        copyButton.action = #selector(copyTapped)
-        replaceButton.target = self
-        replaceButton.action = #selector(replaceTapped)
-        runButton.target = self
-        runButton.action = #selector(runTapped)
-        cancelButton.target = self
-        cancelButton.action = #selector(cancelTapped)
-
-        for (button, width) in [(speakButton, 38.0), (settingsButton, 116.0), (lastResultButton, 100.0), (copyButton, 92.0), (replaceButton, 112.0), (cancelButton, 80.0), (runButton, 84.0)] {
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.isBordered = false
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 8
-            button.layer?.masksToBounds = true
-            button.layer?.borderWidth = 1
-            button.widthAnchor.constraint(equalToConstant: width).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 30).isActive = true
-        }
-
-        let actionSpacer = NSView()
-        actionSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let actionRow = NSStackView(views: [speakButton, settingsButton, lastResultButton, actionSpacer, copyButton, replaceButton, cancelButton, runButton])
-        actionRow.orientation = .horizontal
-        actionRow.spacing = 8
-        actionRow.alignment = .centerY
-        actionRow.translatesAutoresizingMaskIntoConstraints = false
-
-        contentView.addSubview(container)
-        container.addSubview(headerRow)
-        container.addSubview(modeStack)
-        container.addSubview(hintLabel)
-        container.addSubview(commandContainer)
-        container.addSubview(outputScroll)
-        container.addSubview(actionRow)
-
-        NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
-            container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
-            container.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-            container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
-
-            headerRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            headerRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            headerRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            headerRow.heightAnchor.constraint(equalToConstant: 22),
-
-            modeStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            modeStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            modeStack.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 8),
-            modeStack.heightAnchor.constraint(equalToConstant: 34),
-
-            hintLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            hintLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            hintLabel.topAnchor.constraint(equalTo: modeStack.bottomAnchor, constant: 8),
-
-            commandContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            commandContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            commandContainer.topAnchor.constraint(equalTo: hintLabel.bottomAnchor, constant: 6),
-            commandContainer.heightAnchor.constraint(equalToConstant: 36),
-            commandField.leadingAnchor.constraint(equalTo: commandContainer.leadingAnchor, constant: 11),
-            commandField.trailingAnchor.constraint(equalTo: commandContainer.trailingAnchor, constant: -11),
-            commandField.centerYAnchor.constraint(equalTo: commandContainer.centerYAnchor),
-
-            outputScroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            outputScroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            outputScroll.topAnchor.constraint(equalTo: commandContainer.bottomAnchor, constant: 10),
-            outputScroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -10),
-
-            actionRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            actionRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            actionRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
-            actionRow.heightAnchor.constraint(equalToConstant: 30),
-        ])
-
-        applyColors()
-    }
-
-    /// Applies (dynamic) colors to layer-backed views. Re-run on appearance changes because
-    /// `cgColor` snapshots the current appearance.
-    private func applyColors() {
-        container.layer?.borderColor = LantorVisual.border.cgColor
-        titleLabel.textColor = LantorVisual.ink
-        modeStack.layer?.backgroundColor = LantorVisual.panel.cgColor
-        modeStack.layer?.borderColor = LantorVisual.borderSubtle.cgColor
-        hintLabel.textColor = LantorVisual.mutedInk
-        commandField.textColor = LantorVisual.ink
-        commandContainer.layer?.borderColor = LantorVisual.border.cgColor
-        outputScroll.layer?.borderColor = LantorVisual.borderSubtle.cgColor
-        outputScroll.layer?.backgroundColor = LantorVisual.panel.cgColor
-        outputTextView.insertionPointColor = LantorVisual.accent
-        render()
-        if !rawOutput.isEmpty || phase == .error {
-            setOutputText(phase == .error ? errorMessage : rawOutput)
-        }
-    }
-
-    private func styleActionButton(_ button: NSButton, kind: ActionButtonKind, title: String? = nil) {
-        if let title {
-            button.title = title
-        }
-        let background: NSColor
-        let border: NSColor
-        let foreground: NSColor
-        let weight: NSFont.Weight
-        switch kind {
-        case .primary:
-            background = LantorVisual.accent
-            border = LantorVisual.accent
-            foreground = LantorVisual.accentInk
-            weight = .semibold
-        case .secondary:
-            background = LantorVisual.control
-            border = LantorVisual.border
-            foreground = LantorVisual.secondaryInk
-            weight = .medium
-        case .warning:
-            background = LantorVisual.warningSoft
-            border = LantorVisual.warningInk.withAlphaComponent(0.32)
-            foreground = LantorVisual.warningInk
-            weight = .semibold
-        }
-        button.layer?.backgroundColor = background.cgColor
-        button.layer?.borderColor = border.cgColor
-        button.contentTintColor = foreground
-        button.attributedTitle = NSAttributedString(
-            string: button.title,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: weight),
-                .foregroundColor: foreground,
-            ]
-        )
-        button.alphaValue = button.isEnabled ? 1 : 0.5
-    }
-
-    private func styleModeButtons() {
-        for (index, button) in modeButtons.enumerated() {
-            let selected = index == currentModeIndex
-            button.layer?.backgroundColor = (selected ? LantorVisual.accentSoft : NSColor.clear).cgColor
-            button.layer?.borderWidth = selected ? 1 : 0
-            button.layer?.borderColor = LantorVisual.accentSoftBorder.cgColor
-            button.alphaValue = button.isEnabled ? 1 : 0.45
-            button.attributedTitle = NSAttributedString(
-                string: compactTitle(for: modes[index]),
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .medium),
-                    .foregroundColor: selected ? LantorVisual.accent : LantorVisual.secondaryInk,
-                ]
-            )
-        }
-    }
-
-    // MARK: Rendering from state
-
-    /// Derives every visible control from `phase`, the current mode and the selection.
-    private func render() {
-        let mode = modes[currentModeIndex]
-        let hasSelection = !selectedText.isEmpty
-        let busy = phase == .running || phase == .readingSelection
-
-        for (index, button) in modeButtons.enumerated() {
-            let candidate = modes[index]
-            button.isEnabled = !busy && (hasSelection || candidate.requiresInstruction)
-        }
-        styleModeButtons()
-
-        let editable = mode.requiresInstruction && !busy
-        commandField.isEditable = editable
-        commandField.isEnabled = editable
-        commandContainer.layer?.backgroundColor = (mode.requiresInstruction ? LantorVisual.input : LantorVisual.panel).cgColor
-        if mode.requiresInstruction {
-            let placeholder = hasSelection ? "Instruction for the selected text…" : "Type an instruction (no text selected)…"
-            commandField.placeholderAttributedString = NSAttributedString(
-                string: placeholder,
-                attributes: [.foregroundColor: LantorVisual.mutedInk, .font: NSFont.systemFont(ofSize: 15)]
-            )
-            commandField.toolTip = nil
-        } else {
-            commandField.placeholderAttributedString = NSAttributedString(string: "")
-            commandField.toolTip = mode.promptPreview
-        }
-
-        switch phase {
-        case .readingSelection:
-            titleLabel.stringValue = "Jit"
-            hintLabel.stringValue = "Reading selection…"
-        case .noSelection:
-            titleLabel.stringValue = "Jit"
-            hintLabel.stringValue = "No text selected — type an instruction for Custom, or select text and try again."
-        case .idle:
-            titleLabel.stringValue = mode.title
-            hintLabel.stringValue = mode.id == "vocabulary"
-                ? "Speak for pronunciation, Run for meaning · \(selectedPreview)"
-                : selectedPreview
-        case .running:
-            titleLabel.stringValue = mode.title
-            hintLabel.stringValue = "Running \(mode.title)…"
-        case .done:
-            titleLabel.stringValue = mode.title
-            hintLabel.stringValue = "Done · \(selectedPreview)"
-        case .error:
-            titleLabel.stringValue = mode.title
-            hintLabel.stringValue = "\(mode.title) failed"
-        }
-        hintLabel.textColor = phase == .error ? LantorVisual.errorInk : LantorVisual.mutedInk
-        let showSetupNotice = setupNotice != nil && (phase == .idle || phase == .noSelection)
-        if let setupNotice, showSetupNotice {
-            hintLabel.stringValue = "⚠ \(setupNotice)"
-            hintLabel.textColor = LantorVisual.errorInk
-        }
-
-        if busy {
-            progressIndicator.startAnimation(nil)
-        } else {
-            progressIndicator.stopAnimation(nil)
-        }
-
-        let speechAvailable = mode.id == "vocabulary" && hasSelection && !busy
-        speakButton.isHidden = !speechAvailable
-        speakButton.isEnabled = speechAvailable
-        updateSpeakButton(speaking: isSpeakingSelectedText)
-
-        settingsButton.isHidden = !((phase == .error && errorNeedsSettings) || showSetupNotice)
-        settingsButton.isEnabled = !settingsButton.isHidden
-        styleActionButton(settingsButton, kind: .secondary)
-
-        lastResultButton.isHidden = !(phase == .noSelection && lastResult != nil)
-        lastResultButton.isEnabled = !lastResultButton.isHidden
-        styleActionButton(lastResultButton, kind: .secondary)
-
-        let hasOutput = !rawOutput.isEmpty && !busy && phase != .error
-        copyButton.isHidden = !hasOutput
-        copyButton.isEnabled = hasOutput
-        replaceButton.isHidden = !(hasOutput && mode.supportsReplace && allowsReplace)
-        replaceButton.isEnabled = !replaceButton.isHidden
-        styleActionButton(copyButton, kind: .secondary)
-        styleActionButton(replaceButton, kind: .secondary)
-
-        cancelButton.isEnabled = true
-        styleActionButton(cancelButton, kind: phase == .running ? .warning : .secondary, title: phase == .running ? "Stop  ⎋" : "Cancel")
-
-        let canRun = !busy && (hasSelection || mode.requiresInstruction)
-        runButton.isEnabled = canRun
-        styleActionButton(runButton, kind: .primary, title: phase == .error ? "Retry  ↩" : "Run  ↩")
-    }
-
-    /// Applies mode-specific field content (called on mode switches, not on every render).
-    private func applyMode() {
-        let mode = modes[currentModeIndex]
-        if !(mode.id == "vocabulary"), isSpeakingSelectedText {
-            onStopSpeech?()
-            isSpeakingSelectedText = false
-        }
-        commandField.stringValue = mode.requiresInstruction ? customInstructionDraft : actionHint(for: mode)
-    }
-
-    // MARK: Actions
-
-    @objc private func runTapped() {
-        guard phase != .running, phase != .readingSelection else { return }
-        let mode = modes[currentModeIndex]
-        let rawInstruction = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if mode.requiresInstruction {
-            customInstructionDraft = rawInstruction
-            if rawInstruction.isEmpty {
-                NSSound.beep()
-                window?.makeFirstResponder(commandField)
-                return
-            }
-        } else if selectedText.isEmpty {
-            NSSound.beep()
-            return
-        }
-        let instruction = mode.requiresInstruction ? rawInstruction : nil
-        phase = .running
-        rawOutput = ""
-        outputDidStream = false
-        expandForOutputIfNeeded()
-        setOutputText("", placeholder: "Waiting for \(mode.title)…")
-        render()
-        window?.makeFirstResponder(nil)
-
-        runGeneration += 1
-        let generation = runGeneration
-        activeRun = onSubmit?(
-            mode.id,
-            instruction,
-            selectedText,
-            { [weak self] delta in
-                Task { @MainActor in
-                    self?.appendOutput(delta, generation: generation)
-                }
-            },
-            { [weak self] result in
-                Task { @MainActor in
-                    self?.finishRunning(result: result, mode: mode, instruction: instruction, generation: generation)
-                }
-            }
-        )
-        if activeRun == nil {
-            finishRunning(
-                result: .failure(NSError(domain: "JitAPP", code: 500, userInfo: [NSLocalizedDescriptionKey: "No processing handler is configured."])),
-                mode: mode,
-                instruction: instruction,
-                generation: generation
-            )
-        }
-    }
-
-    @objc private func cancelTapped() {
-        if phase == .running {
-            runGeneration += 1
-            activeRun?.cancel()
-            activeRun = nil
-            phase = rawOutput.isEmpty ? .idle : .done
-            if rawOutput.isEmpty {
-                setOutputText("", placeholder: "Canceled.")
-            }
-            render()
-            focus()
-            return
-        }
-        window?.close()
-    }
-
-    @objc private func speakTapped() {
-        guard modes[currentModeIndex].id == "vocabulary", !selectedText.isEmpty else { return }
-        let started = onToggleSpeech?(selectedText) { [weak self] speaking in
-            self?.setSpeechState(speaking)
-        } ?? false
-        setSpeechState(started)
-    }
-
-    @objc private func replaceTapped() {
-        let output = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !output.isEmpty, modes[currentModeIndex].supportsReplace, allowsReplace else { return }
-        onReplace?(output)
-    }
-
-    @objc private func copyTapped() {
-        let output = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !output.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(output, forType: .string)
-        styleActionButton(copyButton, kind: .secondary, title: "Copied ✓")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-            guard let self else { return }
-            self.styleActionButton(self.copyButton, kind: .secondary, title: "Copy  ⌘C")
-        }
-    }
-
-    @objc private func settingsTapped() {
-        onOpenSettings?()
-        window?.close()
-    }
-
-    @objc private func lastResultTapped() {
-        guard let lastResult else { return }
-        showHistoryEntry(lastResult)
-    }
-
-    @objc private func modeButtonTapped(_ sender: NSButton) {
-        guard let raw = sender.identifier?.rawValue, let selected = Int(raw) else { return }
-        selectMode(selected)
-    }
-
-    private func selectMode(_ index: Int) {
-        guard index >= 0, index < modes.count, index != currentModeIndex else { return }
-        guard phase != .running, phase != .readingSelection else { return }
-        let target = modes[index]
-        if selectedText.isEmpty && !target.requiresInstruction {
-            NSSound.beep()
-            return
-        }
-        if modes[currentModeIndex].requiresInstruction {
-            customInstructionDraft = commandField.stringValue
-        }
-        currentModeIndex = index
-        if phase == .done || phase == .error {
-            phase = .idle
-        }
-        applyMode()
-        render()
-        focus()
-    }
-
-    private func moveMode(delta: Int) {
-        guard modes.count > 1 else { return }
-        var index = currentModeIndex
-        for _ in 0..<modes.count {
-            index = (index + delta + modes.count) % modes.count
-            if !selectedText.isEmpty || modes[index].requiresInstruction {
-                selectMode(index)
-                return
-            }
-        }
-    }
-
-    // MARK: Keyboard
-
-    private func installKeyMonitor() {
-        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, event.window === self.window else { return event }
-            return self.handlePanelKeyDown(event) ? nil : event
-        }
-    }
-
-    private func handlePanelKeyDown(_ event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        let busy = phase == .running || phase == .readingSelection
-        if event.keyCode == 53 { // Esc
-            cancelTapped()
-            return true
-        }
-        if flags == .command, let chars = event.charactersIgnoringModifiers {
-            if let digit = Int(chars), digit >= 1, digit <= modes.count {
-                selectMode(digit - 1)
-                return true
-            }
-            if chars == "c" {
-                let outputHasSelection = window?.firstResponder === outputTextView && outputTextView.selectedRange().length > 0
-                if !rawOutput.isEmpty, !outputHasSelection, phase == .done {
-                    copyTapped()
-                    return true
-                }
-                return false
-            }
-            if event.keyCode == 36 || event.keyCode == 76 { // ⌘↩
-                if !replaceButton.isHidden {
-                    replaceTapped()
-                }
-                return true
-            }
-            return false
-        }
-        guard flags.isEmpty else { return false }
-        if event.keyCode == 36 || event.keyCode == 76 { // Return / Enter
-            if !busy {
-                runTapped()
-            }
-            return true
-        }
-        if event.keyCode == 126 { // Up
-            if !busy { moveMode(delta: -1) }
-            return true
-        }
-        if event.keyCode == 125 { // Down
-            if !busy { moveMode(delta: 1) }
-            return true
-        }
-        return false
-    }
-
-    // MARK: Run lifecycle
-
-    private func finishRunning(result: Result<String, Error>, mode: Mode, instruction: String?, generation: Int) {
-        guard generation == runGeneration else { return }
-        activeRun = nil
-        switch result {
-        case .success(let output):
-            // The completed response is authoritative if a CLI event revised
-            // an earlier snapshot or emitted more than one agent message.
-            rawOutput = output
-            phase = .done
-            setOutputText(rawOutput)
-            render()
-            onResult?(HistoryEntry(
-                id: UUID(),
-                modeID: mode.id,
-                modeTitle: mode.title,
-                selectedText: selectedText,
-                instruction: instruction,
-                output: rawOutput,
-                date: Date()
-            ))
-            restoreFirstResponder()
-        case .failure(let error):
-            if error is CancellationError { return }
-            let described = FriendlyError.describe(error)
-            errorMessage = described.message
-            errorNeedsSettings = described.needsSettings
-            phase = .error
-            setOutputText(errorMessage, isError: true)
-            render()
-            restoreFirstResponder()
-        }
-    }
-
-    private func appendOutput(_ delta: String, generation: Int) {
-        guard generation == runGeneration, phase == .running else { return }
-        rawOutput += delta
-        outputDidStream = true
-        setOutputText(rawOutput)
-        scrollOutputToEnd()
-    }
-
-    private func setSpeechState(_ speaking: Bool) {
-        isSpeakingSelectedText = speaking
-        updateSpeakButton(speaking: speaking)
-        if modes[currentModeIndex].id == "vocabulary", phase == .idle || phase == .done {
-            hintLabel.stringValue = speaking ? "Speaking · \(selectedPreview)" : "Speak for pronunciation, Run for meaning · \(selectedPreview)"
-        }
-    }
-
-    private func updateSpeakButton(speaking: Bool) {
-        let symbolName = speaking ? "speaker.slash.fill" : "speaker.wave.2.fill"
-        speakButton.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: speaking ? "Stop speaking" : "Speak selected text")
-        speakButton.image?.isTemplate = true
-        let voice = speechVoiceDescription.isEmpty ? "" : " · \(speechVoiceDescription)"
-        speakButton.toolTip = speaking ? "Stop speaking" : "Speak selected text\(voice)"
-        styleActionButton(speakButton, kind: speaking ? .warning : .secondary)
-        speakButton.contentTintColor = speaking ? LantorVisual.warningInk : LantorVisual.secondaryInk
-        speakButton.imagePosition = .imageOnly
-    }
-
-    // MARK: Output view
-
-    private func setOutputText(_ text: String, placeholder: String = "(No content returned)", isError: Bool = false) {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let style = OutputFormatter.Style(
-            body: NSFont.systemFont(ofSize: 14),
-            ink: isError ? LantorVisual.errorInk : LantorVisual.ink,
-            secondaryInk: LantorVisual.secondaryInk,
-            accent: isError ? LantorVisual.errorInk : LantorVisual.accent
-        )
-        let rendered: NSAttributedString
-        if normalized.isEmpty {
-            rendered = NSAttributedString(string: placeholder, attributes: [
-                .font: style.body,
-                .foregroundColor: LantorVisual.mutedInk,
-            ])
-        } else {
-            rendered = OutputFormatter.attributedString(from: text, style: style)
-        }
-        outputTextView.textStorage?.setAttributedString(rendered)
-    }
-
-    private func scrollOutputToEnd() {
-        let length = (outputTextView.string as NSString).length
-        outputTextView.scrollRangeToVisible(NSRange(location: length, length: 0))
-    }
-
-    private func expandForOutputIfNeeded() {
-        outputScroll.isHidden = false
-        guard let window, !expanded else { return }
-        expanded = true
-        var size = UserDefaults.standard.string(forKey: Layout.sizeDefaultsKey).map(NSSizeFromString) ?? Layout.defaultExpandedSize
-        size.width = min(max(size.width, Layout.minExpandedSize.width), Layout.maxSize.width)
-        size.height = min(max(size.height, Layout.minExpandedSize.height), Layout.maxSize.height)
-        window.minSize = Layout.minExpandedSize
-        window.maxSize = Layout.maxSize
-        var frame = window.frame
-        let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? frame
-        frame.origin.y = frame.maxY - size.height
-        frame.size = size
-        if frame.minY < visible.minY { frame.origin.y = visible.minY + 8 }
-        if frame.maxY > visible.maxY { frame.origin.y = visible.maxY - frame.height - 8 }
-        if frame.maxX > visible.maxX { frame.origin.x = visible.maxX - frame.width - 8 }
-        if frame.minX < visible.minX { frame.origin.x = visible.minX + 8 }
-        window.setFrame(frame, display: true, animate: true)
-    }
-
-    func windowDidEndLiveResize(_ notification: Notification) {
-        guard expanded, let window else { return }
-        UserDefaults.standard.set(NSStringFromSize(window.frame.size), forKey: Layout.sizeDefaultsKey)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        runGeneration += 1
-        activeRun?.cancel()
-        activeRun = nil
-        onStopSpeech?()
-        stopOutsideClickMonitor()
-        if let localKeyMonitor {
-            NSEvent.removeMonitor(localKeyMonitor)
-            self.localKeyMonitor = nil
-        }
-        onClose?()
-    }
-
-    private func stopOutsideClickMonitor() {
-        if let globalClickMonitor {
-            NSEvent.removeMonitor(globalClickMonitor)
-            self.globalClickMonitor = nil
-        }
-        if let localClickMonitor {
-            NSEvent.removeMonitor(localClickMonitor)
-            self.localClickMonitor = nil
-        }
-    }
-
-    private func closeIfClickOutside() {
-        guard let window, window.isVisible else { return }
-        if !window.frame.contains(NSEvent.mouseLocation) {
-            window.close()
-        }
-    }
-
-    /// Places the panel just below the selection (or the mouse), flipping above when there is no room.
-    private func position(near anchor: NSRect) {
-        guard let window else { return }
-        let frame = window.frame
-        let screen = NSScreen.screens.first { $0.frame.intersects(anchor) }
-            ?? NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
-            ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        var x = anchor.minX - 12
-        var y = anchor.minY - frame.height - 10
-        if y < visible.minY { y = anchor.maxY + 10 }
-        if y + frame.height > visible.maxY { y = visible.maxY - frame.height - 8 }
-        if x + frame.width > visible.maxX { x = visible.maxX - frame.width - 8 }
-        if x < visible.minX { x = visible.minX + 8 }
-        window.setFrameOrigin(NSPoint(x: x, y: y))
-    }
-
-    private func compactTitle(for mode: Mode) -> String {
-        switch mode.id {
-        case "custom": return "Custom"
-        case "refine": return "Polish"
-        case "translate": return "Translate"
-        case "vocabulary": return "Words"
-        default: return mode.title
-        }
-    }
-
-    private func actionHint(for mode: Mode) -> String {
-        switch mode.id {
-        case "refine": return "Polish the selected text"
-        case "translate": return "Translate the selected text (direction is detected automatically)"
-        case "vocabulary": return "Speak for pronunciation, Run for meaning and usage"
-        default: return "Uses the saved prompt for \(mode.title)"
-        }
-    }
-}
-
 let app = NSApplication.shared
+#if DEBUG
+if SnapshotRenderer.runIfRequested() { exit(0) }
+#endif
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
