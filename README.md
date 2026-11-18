@@ -48,7 +48,17 @@ You can also run the steps separately:
 
 ## Signing
 
-By default, the app is signed with ad-hoc signing (works on the local machine).
+macOS ties Accessibility and Input Monitoring grants to the app's signature. An ad hoc
+signature changes with every build, so each new build would lose them. Run this once per Mac:
+
+```bash
+./scripts/setup_signing.sh
+```
+
+It creates a local "Jit Local Code Signing" certificate in its own keychain under
+`~/Library/Application Support/JitSigning`, and `scripts/sign_app.sh` uses it from then on.
+Builds signed with it keep their permissions. Without it, the build falls back to ad hoc
+signing and prints a warning.
 
 If you have a Developer ID certificate, specify it at build time:
 
@@ -102,9 +112,11 @@ The Words card relies on the default Words prompt's `Headword: / Part of speech:
 
 ## Permissions and System Settings
 
-To read selected text globally, enable this macOS permission:
-
-- `System Settings -> Privacy & Security -> Accessibility`
+Jit needs Accessibility (which also covers Post Events) and Input Monitoring. In Settings ->
+Permissions, click **Allow Jit…**: System Settings opens at the right page with a Jit tile
+beside it. Drag the tile into the list, or turn on Jit's switch if it is already listed.
+Jit checks once a second, moves on to the next page by itself, and comes back when everything
+is allowed. If a switch is on but Jit still shows Not allowed, click **Restart Jit**.
 
 To enable launch at login, if the menu shows "Waiting for system approval", go to:
 
@@ -115,6 +127,7 @@ To enable launch at login, if the menu shows "Waiting for system approval", go t
 - `scripts/generate_icon.swift`: Generate a 1024px PNG icon
 - `scripts/make_icon.sh`: Generate `.icns`
 - `scripts/build_app.sh`: Build and assemble the `.app`
+- `scripts/setup_signing.sh`: Create the local signing certificate (once per Mac)
 - `scripts/sign_app.sh`: Sign and verify the app
 - `scripts/package_dmg.sh`: Package a `.dmg`
 - `scripts/release.sh`: One-command build + package

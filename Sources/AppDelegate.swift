@@ -415,8 +415,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onDiagnosePermissions = { [weak self] in
             self?.permissionReport() ?? "Diagnostics failed."
         }
-        controller.onRequestPermissions = { [weak self] in
-            self?.requestPermissionAndReport() ?? "Permission request failed."
+        controller.onRestart = { [weak self] in
+            self?.restart()
         }
         controller.onResetPermissions = { [weak self] in
             self?.resetPermissionsAndReport() ?? "Permission reset failed."
@@ -468,6 +468,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.show(section: section)
     }
 
+    /// Quits and opens Jit again once this process is gone, so the new one can
+    /// take the global hotkeys and pick up permissions granted meanwhile.
+    private func restart() {
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = [
+            "-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"$2\"",
+            "sh", String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath,
+        ]
+        do {
+            try relaunch.run()
+        } catch {
+            NSLog("Jit: could not schedule relaunch: \(error)")
+            return
+        }
+        quit()
+    }
+
     @objc private func quit() {
         isQuitting = true
         settingsWindowController?.window?.close()
@@ -491,15 +509,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "",
             "If any item is not allowed, enable it in System Settings -> Privacy & Security."
         ].joined(separator: "\n")
-    }
-
-    private func requestPermissionAndReport() -> String {
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-        _ = CGRequestListenEventAccess()
-        _ = CGRequestPostEventAccess()
-
-        return permissionReport() + "\n\nIf it still shows not allowed, enable permissions manually in System Settings and restart Jit."
     }
 
     private func resetPermissionsAndReport() -> String {

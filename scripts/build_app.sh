@@ -25,6 +25,10 @@ mkdir -p "$MACOS_DIR" "$RES_DIR"
 cp "$BIN_SRC" "$BIN_DST"
 chmod +x "$BIN_DST"
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RES_DIR/AppIcon.icns"
+# SwiftPM resource bundles (PermissionFlow's panel strings) live next to the binary.
+for bundle in "$BUILD_DIR"/*.bundle; do
+  [[ -e "$bundle" ]] && cp -R "$bundle" "$RES_DIR/"
+done
 
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -57,7 +61,6 @@ cat > "$PLIST_PATH" <<PLIST
 </plist>
 PLIST
 
-IDENTITY="${SIGN_IDENTITY:--}"
-"$ROOT_DIR/scripts/sign_app.sh" "$APP_DIR" "$IDENTITY"
+"$ROOT_DIR/scripts/sign_app.sh" "$APP_DIR" "${SIGN_IDENTITY:-}"
 
 echo "Built app: $APP_DIR"

@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import JitCLI
+import PermissionFlow
 
 // MARK: - Setup status (single source of truth for banners, badges, menu bar, palette)
 
@@ -341,7 +342,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     var onHotkeyCaptureChanged: ((Bool) -> Void)?
     var onTest: ((AppConfig, FeatureConfig, @escaping @MainActor (Result<String, Error>) -> Void) -> Void)?
     var onDiagnosePermissions: (() -> String)?
-    var onRequestPermissions: (() -> String)?
+    /// Relaunches Jit; some macOS permissions only take effect in a new process.
+    var onRestart: (() -> Void)?
     var onResetPermissions: (() -> String)?
     var loginItemInfo: (() -> (enabled: Bool, text: String))?
     /// Returns an error message when toggling failed.
@@ -401,6 +403,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private weak var loginSwitch: NSSwitch?
     private weak var loginDetail: NSTextField?
     private weak var permissionsFeedbackLabel: NSTextField?
+    private let permissionGuide = PermissionGuide()
 
     private var hotkeyCaptureMonitor: Any?
     private var escapeMonitor: Any?
@@ -447,6 +450,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         configureInputFields()
         buildUI()
         installEscapeMonitor()
+        configurePermissionGuide()
     }
 
     required init?(coder: NSCoder) {
@@ -456,6 +460,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     // MARK: Window lifecycle
 
     func windowWillClose(_ notification: Notification) {
+        permissionGuide.stop()
         stopHotkeyCapture()
         window?.makeFirstResponder(nil)
         commit()
@@ -1421,23 +1426,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private func permissionsGroups() -> [NSView] {
         let current = status ?? statusProvider?()
-        let rows: [(String, String, Bool, String, Selector)] = [
+        let rows: [(String, String, Bool, String, PermissionFlowPane)] = [
             ("Accessibility", "accessibility", current?.accessibility ?? AXIsProcessTrusted(),
-             "Reads the selected text and positions the palette next to it.", #selector(openAccessibilitySettingsTapped)),
+             "Reads the selected text and positions the palette next to it.", .accessibility),
             ("Input Monitoring", "keyboard", current?.inputMonitoring ?? CGPreflightListenEventAccess(),
-             "Lets the global shortcut work while other apps are focused.", #selector(openInputMonitoringSettingsTapped)),
+             "Lets the global shortcut work while other apps are focused.", .inputMonitoring),
+            // macOS lists Post Events under Accessibility.
             ("Post Events", "cursorarrow.click", current?.postEvents ?? CGPreflightPostEventAccess(),
-             "Pastes results back with Replace and copies selections as a fallback.", #selector(openPrivacySecuritySettingsTapped)),
+             "Pastes results back with Replace and copies selections as a fallback.", .accessibility),
         ]
         var cardRows: [NSView] = []
-        for (title, symbol, allowed, detail, selector) in rows {
+        for (title, symbol, allowed, detail, pane) in rows {
             let chip = LantorChip(allowed ? "Allowed" : "Not allowed", tone: allowed ? .success : .warning, dot: true)
             var views: [NSView] = [chip]
             if !allowed {
-                let open = LantorButton("Open Settings", kind: .secondary)
-                open.height = 28
-                open.onClick = { [weak self] in _ = self?.perform(selector) }
-                views.append(open)
+                let allow = LantorButton("Allow…", kind: .secondary)
+                allow.height = 28
+                allow.onClick = { [weak self, weak allow] in
+                    self?.startPermissionGuide(pane: pane, from: allow)
+                }
+                views.append(allow)
             }
             let accessory = NSStackView(views: views)
             accessory.orientation = .horizontal
@@ -1447,19 +1455,30 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
 
         let allGranted = rows.allSatisfy { $0.2 }
-        let request = LantorButton("Grant Access", kind: allGranted ? .secondary : .primary)
-        request.onClick = { [weak self] in self?.requestPermissionsTapped() }
+        var buttonViews: [NSView] = []
+        if !allGranted {
+            let allow = LantorButton("Allow Jit…", kind: .primary)
+            allow.onClick = { [weak self, weak allow] in
+                self?.startPermissionGuide(pane: nil, from: allow)
+            }
+            let restart = LantorButton("Restart Jit", kind: .secondary)
+            restart.onClick = { [weak self] in self?.onRestart?() }
+            buttonViews += [allow, restart]
+        }
         let diagnose = LantorButton("Copy Diagnostics", kind: .secondary)
         diagnose.onClick = { [weak self] in self?.diagnosePermissionsTapped() }
         let reset = LantorButton("Reset Permissions…", kind: .danger)
         reset.onClick = { [weak self] in self?.resetPermissionsTapped() }
-        let buttons = NSStackView(views: [request, diagnose, reset])
+        buttonViews += [diagnose, reset]
+        let buttons = NSStackView(views: buttonViews)
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 8
         let guide = helpLabel(allGranted
-            ? "All set. If a permission stops working after an update, use Reset and grant it again."
-            : "Click Grant Access to trigger the system prompts, enable Jit in System Settings, then come back here.")
+            ? "All set."
+            : "Click Allow Jit…: System Settings opens with a Jit tile beside it. Drag the tile into the list, "
+                + "or turn on Jit's switch if it is already there. Jit notices each change and moves on by itself. "
+                + "If a switch is on but Jit still shows Not allowed, restart Jit.")
         let feedback = helpLabel("")
         permissionsFeedbackLabel = feedback
         let actions = NSStackView(views: [guide, buttons, feedback])
@@ -1479,17 +1498,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         showToast(message, kind: kind)
     }
 
-    private func requestPermissionsTapped() {
-        let report = onRequestPermissions?() ?? ""
-        refreshStatus()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+    private func configurePermissionGuide() {
+        permissionGuide.onChange = { [weak self] _ in
             self?.refreshStatus()
         }
-        if report.contains("Not Allowed") {
-            setPermissionsFeedback("System prompts requested. Enable Jit in System Settings, then return here.", kind: .neutral)
-        } else {
-            setPermissionsFeedback("All permissions are already granted.", kind: .success)
+        permissionGuide.onFinished = { [weak self] in
+            guard let self else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            self.window?.makeKeyAndOrderFront(nil)
+            self.refreshStatus()
+            self.setPermissionsFeedback("All permissions are granted.", kind: .success)
         }
+    }
+
+    /// Opens System Settings at `pane` (or the first missing permission) with
+    /// the drag-in helper, then follows the grants as they happen.
+    private func startPermissionGuide(pane: PermissionFlowPane?, from button: NSView?) {
+        var sourceFrame: CGRect?
+        if let button, let window = button.window {
+            sourceFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
+        }
+        permissionGuide.start(pane: pane, from: sourceFrame)
+        setPermissionsFeedback("Drag Jit into the list in System Settings, or turn on its switch.", kind: .neutral)
     }
 
     private func diagnosePermissionsTapped() {
@@ -1514,43 +1544,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             NSPasteboard.general.setString(report, forType: .string)
             self.refreshStatus()
             self.setPermissionsFeedback("Permissions reset. Grant access again, then restart Jit. Details copied to the clipboard.", kind: .neutral)
-        }
-    }
-
-    @objc private func openPrivacySecuritySettingsTapped() {
-        openSystemSettings(candidates: [
-            "x-apple.systempreferences:com.apple.preference.security?Privacy",
-            "x-apple.systempreferences:com.apple.preference.security",
-        ])
-    }
-
-    @objc private func openAccessibilitySettingsTapped() {
-        openSystemSettings(candidates: [
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy",
-        ])
-    }
-
-    @objc private func openInputMonitoringSettingsTapped() {
-        openSystemSettings(candidates: [
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy",
-        ])
-    }
-
-    private func openSystemSettings(candidates: [String]) {
-        for candidate in candidates {
-            guard let url = URL(string: candidate) else { continue }
-            if NSWorkspace.shared.open(url) {
-                setPermissionsFeedback("Opened System Settings — enable Jit there and come back.", kind: .neutral)
-                return
-            }
-        }
-        let appURL = URL(fileURLWithPath: "/System/Applications/System Settings.app")
-        if NSWorkspace.shared.open(appURL) {
-            setPermissionsFeedback("Opened System Settings. Go to Privacy & Security.", kind: .neutral)
-        } else {
-            setPermissionsFeedback("Could not open System Settings.", kind: .error)
         }
     }
 
