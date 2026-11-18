@@ -97,6 +97,9 @@ struct AppConfig {
     var baseURL: String
     var apiKey: String
     var model: String
+    /// API mode only: ask the model to answer without a thinking phase
+    /// (`thinking: {type: disabled}`, understood by DeepSeek).
+    var skipThinking: Bool
     var targetLanguage: String
     var features: [FeatureConfig]
 
@@ -193,6 +196,7 @@ struct AppConfig {
         baseURL: "https://api.deepseek.com/v1",
         apiKey: "",
         model: "deepseek-chat",
+        skipThinking: true,
         targetLanguage: "Chinese",
         features: [
             FeatureConfig(
@@ -313,6 +317,7 @@ struct AppConfig {
         config.claudePath = d.string(forKey: "claudePath") ?? ""
         config.claudeModel = d.string(forKey: "claudeModel") ?? ""
         if let value = d.string(forKey: "model")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.model = value }
+        if d.object(forKey: "skipThinking") != nil { config.skipThinking = d.bool(forKey: "skipThinking") }
         if let value = d.string(forKey: "targetLanguage")?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { config.targetLanguage = value }
         if let featuresData = d.data(forKey: "featureConfigs"),
            let decoded = try? JSONDecoder().decode([FeatureConfig].self, from: featuresData),
@@ -402,6 +407,7 @@ struct AppConfig {
         d.set(baseURL, forKey: "baseURL")
         d.set(apiKey, forKey: "apiKey")
         d.set(model, forKey: "model")
+        d.set(skipThinking, forKey: "skipThinking")
         d.set(targetLanguage, forKey: "targetLanguage")
         if let data = try? JSONEncoder().encode(features) {
             d.set(data, forKey: "featureConfigs")
@@ -757,10 +763,15 @@ struct ChatRequest: Encodable {
         let content: String
     }
 
+    struct Thinking: Encodable {
+        let type: String
+    }
+
     let model: String
     let messages: [Message]
     let temperature: Double
     let stream: Bool?
+    let thinking: Thinking?
 }
 
 struct ChatResponse: Decodable {
@@ -1038,7 +1049,8 @@ final class TranslationService {
                 .init(role: "user", content: prompt)
             ],
             temperature: 0.2,
-            stream: stream
+            stream: stream,
+            thinking: config.skipThinking ? .init(type: "disabled") : nil
         )
 
         var request = URLRequest(url: url)
@@ -1058,6 +1070,8 @@ final class TranslationService {
         switch status {
         case 401, 403:
             message = "API key was rejected (\(status)). Check the key and Base URL in Settings."
+        case 400 where raw.localizedCaseInsensitiveContains("thinking"):
+            message = "The API rejected the thinking setting (400). Turn off Skip thinking in Settings → AI."
         case 404:
             message = "Endpoint not found (404). Check the Base URL and model name in Settings."
         case 429:
@@ -1502,6 +1516,8 @@ enum FriendlyError {
         let nsError = error as NSError
         let detail = shortDetail(nsError.localizedDescription)
         switch nsError.code {
+        case 400 where detail.contains("Skip thinking"):
+            return (detail, true)
         case 400:
             return ("The API rejected the request (400). Check the model name in Settings.\n\(detail)", true)
         case 401, 403:

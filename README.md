@@ -20,6 +20,7 @@ A menu bar app for running AI actions on selected text globally on macOS, using 
 - Speech uses the best installed English voice (premium/enhanced when available) with a shortcut to download better voices
 - Local Codex CLI and Claude Code CLI modes reuse your saved login; no API key is required in Jit
 - Choose a local Codex or Claude model, or an API `Base URL / API Key / Model`; settings are saved separately
+- API mode skips the model's thinking phase by default (`thinking: {type: disabled}`, understood by DeepSeek), so answers start sooner; turn off **Skip thinking** in Settings → AI Model if your API rejects it
 - Launch-at-login toggle from the menu bar
 
 ## Run Locally

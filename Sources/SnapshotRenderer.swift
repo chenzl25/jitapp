@@ -97,11 +97,13 @@ enum SnapshotRenderer {
     // MARK: Settings
 
     private static func renderSettings(into directory: URL) {
-        let sections: [(SettingsWindowController.Section, String)] = [(.general, "general"), (.model, "model"), (.actions, "actions"), (.permissions, "permissions")]
+        let sections: [(SettingsWindowController.Section, String)] = [(.general, "general"), (.model, "model"), (.model, "model-api"), (.actions, "actions"), (.permissions, "permissions")]
         for dark in [false, true] {
             for (section, name) in sections {
                 for broken in [false, true] where !(broken && section != .general) {
-                    let controller = SettingsWindowController(config: AppConfig.defaults)
+                    var config = AppConfig.defaults
+                    if name == "model-api" { config.backend = .chatAPI }
+                    let controller = SettingsWindowController(config: config)
                     controller.statusProvider = {
                         SetupStatus(
                             connectionConfigured: true, connectionProblem: "", accessibility: !broken, inputMonitoring: true,

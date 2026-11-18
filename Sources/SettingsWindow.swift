@@ -367,6 +367,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let claudeModelField = NSTextField(string: "")
     private var backend: AIBackend
     private var targetLanguage: String
+    private var skipThinking: Bool
     private var featureConfigs: [FeatureConfig]
     private var shortcut: ShortcutDraft
     private var status: SetupStatus?
@@ -416,6 +417,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     init(config: AppConfig) {
         backend = config.backend
         targetLanguage = config.targetLanguage
+        skipThinking = config.skipThinking
         featureConfigs = config.features
         let entry = config.features.first(where: { $0.id == "custom" }) ?? AppConfig.defaults.features[0]
         shortcut = ShortcutDraft(feature: entry)
@@ -519,6 +521,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             baseURL: baseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             model: modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            skipThinking: skipThinking,
             targetLanguage: targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines),
             features: features
         )
@@ -1256,6 +1259,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             keyRow.spacing = 8
             rows.append(formRow("API key", control: keyRow))
             rows.append(formRow("Model", control: LantorFieldBox(modelField)))
+            let thinkingSwitch = NSSwitch()
+            thinkingSwitch.state = skipThinking ? .on : .off
+            thinkingSwitch.target = self
+            thinkingSwitch.action = #selector(skipThinkingToggled(_:))
+            rows.append(toggleRow(
+                symbol: "hare",
+                title: "Skip thinking",
+                subtitle: "Answers start sooner. Turn off if your API rejects it.",
+                accessory: thinkingSwitch
+            ).row)
         }
 
         // Check
@@ -1304,6 +1317,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         commit(toast: "AI connection changed.")
         sectionPages[.model] = nil
         showSection(.model, animated: false, force: true)
+    }
+
+    @objc private func skipThinkingToggled(_ sender: NSSwitch) {
+        skipThinking = sender.state == .on
+        invalidateConnectionTest()
+        commit(toast: skipThinking ? "Thinking skipped." : "Thinking allowed.")
     }
 
     private func pasteAPIKey() {
